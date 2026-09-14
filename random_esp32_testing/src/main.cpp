@@ -1,18 +1,25 @@
+// ============================================================
+// ESP32 BLINK TEST - PlatformIO connectivity/upload sanity check
+// ============================================================
 #include <Arduino.h>
 
-// put function declarations here:
-int myFunction(int, int);
+// Most ESP32 dev boards have an onboard LED on GPIO2, but this
+// varies by board - check your board's silkscreen/datasheet and
+// change this if GPIO2 doesn't blink anything.
+#define LED_PIN 2
 
 void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  Serial.println("Blink test starting...");
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-}
+  digitalWrite(LED_PIN, HIGH);
+  Serial.println("LED ON");
+  delay(500);
 
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+  digitalWrite(LED_PIN, LOW);
+  Serial.println("LED OFF");
+  delay(500);
 }
