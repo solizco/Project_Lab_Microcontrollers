@@ -3,9 +3,12 @@
 #include <Adafruit_ST7789.h>
 #include "protocol.h"
 #include "board.h"
+#include "minimax.h"
 #include "difficulty.h"
 #include "input.h"
 #include "display.h"
+
+
 
 // ============================================================
 // Game Brain: Main State Machine
@@ -15,7 +18,6 @@
 // (AWAITING_DROP handles both identically) -- this mirrors the
 // Python test suite's design where difficulty is a config plugged
 // into one search function, not a separate code path per difficulty.
-//
 // ADJUST these UART pins/baud to match the actual wiring to Motion
 // Controller once Guyton's PCB is finalized -- placeholders for now.
 #define MOTION_UART_BAUD 115200
@@ -53,35 +55,26 @@ C4Player pending_mover;               // who made the pending move -- captured
                                         // flips inside c4_apply_move()
 
 // ------------------------------------------------------------
-// get_ai_move: PLACEHOLDER -- replace with the real bitboard minimax
+// get_ai_move: real search now wired in
 // ------------------------------------------------------------
-// This is intentionally the ONLY function that needs to change once
-// the alpha-beta port exists. Everything else in this file (state
-// machine, UART handling, display, input) is already built against
-// the real board representation and difficulty config, so swapping
-// this one function for a real h_alphabeta_search() call is the
-// entire integration step later.
-//
-// Current behavior: opening book plays center column on an empty
-// board (matches the Python test suite's DIFF_HACKER opening-book
-// logic); otherwise picks the first legal column, searching outward
-// from center. This is NOT real difficulty behavior -- it's just
-// enough to make the full game loop testable end-to-end before the
-// search exists.
+// Opening book and (future) blunder-chance logic stay OUTSIDE
+// h_alphabeta_search, same separation as the Python test suite's
+// get_bot_move() -- the search function itself stays pure (always
+// returns its best move), and difficulty-flavor decisions (skip
+// search on move 1, occasionally play a worse move on Noob) wrap
+// around it here.
 uint8_t get_ai_move(const C4State* s, const DifficultyConfig* cfg) {
     bool board_empty = (s->bitboard[0] == 0 && s->bitboard[1] == 0);
     if (cfg->use_opening_book && board_empty) {
         return 3; // center column
     }
 
-    static const uint8_t center_first_order[7] = {3, 2, 4, 1, 5, 0, 6};
-    for (int i = 0; i < 7; i++) {
-        uint8_t c = center_first_order[i];
-        if (c4_is_column_legal(s, c)) return c;
-    }
-    return 0; // unreachable if this is only ever called when a legal
-               // move exists (state machine should never call it on
-               // a full board)
+    SearchResult result = h_alphabeta_search(*s, cfg->max_depth);
+    // TODO: Noob's blunder_chance_pct isn't applied yet -- once this
+    // is tested and trusted on real hardware, wrap this return with
+    // the same random-legal-move substitution logic the Python
+    // version used, gated on cfg->blunder_chance_pct.
+    return result.move;
 }
 
 // ------------------------------------------------------------
