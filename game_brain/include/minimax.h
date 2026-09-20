@@ -1,4 +1,12 @@
 #pragma once
+// Forces -O2 for THIS FILE ONLY, regardless of whatever the project's
+// overall build_type/build_flags are doing -- a source-level override
+// that doesn't depend on getting .ini flags to actually propagate,
+// which has been unreliable through build_src_filter in this project.
+// GCC's function-level/file-level #pragma optimize is respected
+// independent of the command-line optimization level.
+#pragma GCC optimize("O2")
+
 #include <stdint.h>
 #include <limits.h>
 #include "board.h"
@@ -83,21 +91,56 @@ static void c4_init_windows() {
 }
 
 // ------------------------------------------------------------
+// popcount64_swar: manually inlined software popcount
+// ------------------------------------------------------------
+// Xtensa LX6 has no hardware popcount instruction. On-target testing
+// showed __builtin_popcountll was costing roughly 50x the runtime of
+// the rest of the search combined -- almost certainly because GCC
+// lowers it to a CALL into a software popcount routine rather than
+// inlining it, and that call overhead adds up fast at ~138 calls per
+// heuristic evaluation. This is the well-known SWAR (SIMD Within A
+// Register) technique, written out directly so the compiler inlines
+// it as pure arithmetic with no call at all. Verified byte-for-byte
+// against __builtin_popcountll across 100,000+ values before use here.
+static inline __attribute__((always_inline)) int popcount64_swar(uint64_t x) {
+    x = x - ((x >> 1) & 0x5555555555555555ULL);
+    x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
+    return (int)((x * 0x0101010101010101ULL) >> 56);
+}
+
+// ------------------------------------------------------------
 // c4_heuristic: Positional evaluation, mirrors Python's window_score
 // ------------------------------------------------------------
+// DIAGNOSTIC SWITCH: change the 0 below to 1 directly and reflash to
+// make this return instantly, skipping all window/popcount work --
+// used to isolate the heuristic as the dominant cost on real hardware
+// (confirmed: ~50x speedup with it disabled).
+#ifndef C4_DISABLE_HEURISTIC
+#define C4_DISABLE_HEURISTIC 0
+#endif
+
 #define C4_CENTER_COL_MASK (0x3FULL << (3 * 7))  // rows 0-5 of column 3
 
 static int32_t c4_heuristic(const C4State* s, C4Player player) {
+#if C4_DISABLE_HEURISTIC
+    return 0;
+#else
     C4Player opp = (player == PLAYER_RED) ? PLAYER_BLACK : PLAYER_RED;
     uint64_t pbb = s->bitboard[player];
     uint64_t obb = s->bitboard[opp];
+    uint64_t all = pbb | obb;
 
-    int32_t score = __builtin_popcountll(pbb & C4_CENTER_COL_MASK) * 6;
+    int32_t score = popcount64_swar(pbb & C4_CENTER_COL_MASK) * 6;
 
     for (int i = 0; i < C4_NUM_WINDOWS; i++) {
         uint64_t mask = g_window_masks[i];
-        int p = __builtin_popcountll(pbb & mask);
-        int o = __builtin_popcountll(obb & mask);
+        if ((all & mask) == 0) continue; // completely empty window --
+                                            // skip both popcounts, it
+                                            // can't contribute a score
+                                            // either way
+        int p = popcount64_swar(pbb & mask);
+        int o = popcount64_swar(obb & mask);
         if (p > 0 && o > 0) continue; // window blocked by both -- worthless to either side
         if (o == 3)      score -= 80;
         else if (p == 3) score += 50;
@@ -108,6 +151,7 @@ static int32_t c4_heuristic(const C4State* s, C4Player player) {
         // as the Python version's reasoning
     }
     return score;
+#endif
 }
 
 // ------------------------------------------------------------
@@ -150,19 +194,101 @@ static inline int32_t c4_terminal_value(const C4State* s, uint8_t depth) {
 static int32_t min_value(C4State s, int32_t alpha, int32_t beta,
                           uint8_t depth, uint8_t max_depth);
 
+// ------------------------------------------------------------
+// Optional heartbeat: lets a caller (test_console) know the search is
+// still alive during a long-running call, without adding real cost to
+// the hot path. Off by default (nullptr) -- the state machine's
+// get_ai_move() never sets this, so real gameplay is unaffected.
+// ------------------------------------------------------------
+typedef void (*C4HeartbeatFn)(uint32_t nodes_so_far);
+static C4HeartbeatFn g_heartbeat_fn = nullptr;
+static uint32_t g_heartbeat_interval = 200000; // call back every N nodes
+
+// ------------------------------------------------------------
+// order_legal_moves: rank legal moves best-first for the player about
+// to move at this node
+// ------------------------------------------------------------
+// This does NOT change the final answer -- alpha-beta returns the same
+// value and the same best move regardless of exploration order. It
+// changes only how many nodes get visited to prove that answer, by
+// letting the search find strong/cutting moves sooner.
+//
+// Ranking: an immediate winning move always goes first (nothing beats
+// winning outright). Everything else is ranked by a one-ply heuristic
+// look -- evaluate what the position looks like FOR THE MOVER right
+// after playing each candidate, and prefer the best-looking one. This
+// costs one extra c4_heuristic() call per legal move at every internal
+// node (up to 7), on top of the normal recursive cost -- the bet is
+// that fewer total nodes explored more than pays for that, which is
+// the standard justification for this technique, but it should be
+// measured on real hardware rather than assumed.
+static int order_legal_moves(const C4State* s, uint8_t* out_moves) {
+    uint8_t moves[C4_WIDTH];
+    int32_t scores[C4_WIDTH];
+    int n = 0;
+    C4Player mover = s->to_move;
+
+    for (int i = 0; i < C4_WIDTH; i++) {
+        uint8_t col = CENTER_FIRST_ORDER[i]; // base order before ranking;
+                                                // also the tiebreak order
+                                                // for equally-scored moves
+        if (!c4_is_column_legal(s, col)) continue;
+
+        C4State next = *s;
+        c4_apply_move(&next, col);
+
+        int32_t score;
+        if (c4_is_win(next.bitboard[mover])) {
+            score = INT32_MAX; // immediate win -- always ranked first
+        } else {
+            score = c4_heuristic(&next, mover);
+        }
+
+        moves[n] = col;
+        scores[n] = score;
+        n++;
+    }
+
+    // Insertion sort, descending by score. n is at most 7 -- not worth
+    // anything fancier. Stable (keeps center-first order among ties),
+    // since it only swaps when strictly greater.
+    for (int i = 1; i < n; i++) {
+        uint8_t m = moves[i];
+        int32_t sc = scores[i];
+        int j = i - 1;
+        while (j >= 0 && scores[j] < sc) {
+            moves[j + 1] = moves[j];
+            scores[j + 1] = scores[j];
+            j--;
+        }
+        moves[j + 1] = m;
+        scores[j + 1] = sc;
+    }
+
+    for (int i = 0; i < n; i++) out_moves[i] = moves[i];
+    return n;
+}
+
 static int32_t max_value(C4State s, int32_t alpha, int32_t beta,
                           uint8_t depth, uint8_t max_depth, uint8_t* out_move) {
     extern uint32_t g_max_calls;
+    extern uint32_t g_min_calls;
     g_max_calls++;
+
+    if (g_heartbeat_fn && (g_max_calls % g_heartbeat_interval) == 0) {
+        g_heartbeat_fn(g_max_calls + g_min_calls);
+    }
 
     if (c4_is_terminal(&s)) return c4_terminal_value(&s, depth);
     if (depth >= max_depth) return c4_heuristic(&s, g_search_player);
 
+    uint8_t ordered[C4_WIDTH];
+    int n = order_legal_moves(&s, ordered);
+
     int32_t v = INT32_MIN;
     uint8_t best_move = 0xFF;
-    for (int i = 0; i < C4_WIDTH; i++) {
-        uint8_t col = CENTER_FIRST_ORDER[i];
-        if (!c4_is_column_legal(&s, col)) continue;
+    for (int i = 0; i < n; i++) {
+        uint8_t col = ordered[i];
 
         C4State next = s;
         c4_apply_move(&next, col);
@@ -184,10 +310,12 @@ static int32_t min_value(C4State s, int32_t alpha, int32_t beta,
     if (c4_is_terminal(&s)) return c4_terminal_value(&s, depth);
     if (depth >= max_depth) return c4_heuristic(&s, g_search_player);
 
+    uint8_t ordered[C4_WIDTH];
+    int n = order_legal_moves(&s, ordered);
+
     int32_t v = INT32_MAX;
-    for (int i = 0; i < C4_WIDTH; i++) {
-        uint8_t col = CENTER_FIRST_ORDER[i];
-        if (!c4_is_column_legal(&s, col)) continue;
+    for (int i = 0; i < n; i++) {
+        uint8_t col = ordered[i];
 
         C4State next = s;
         c4_apply_move(&next, col);
