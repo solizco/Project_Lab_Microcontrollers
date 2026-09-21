@@ -66,6 +66,19 @@ enum FaceEvent : uint8_t {
 #define C4_MAX_PAYLOAD   4
 
 // ------------------------------------------------------------
+// SelectedMode (payload of CMD_MODE_SELECTED)
+// ------------------------------------------------------------
+// Matches Motion Controller's own local menu enum ordering exactly --
+// PASS_PLAY means two humans, no AI turn ever runs. NOOB/PRO/HACKER
+// map to Difficulty in difficulty.h (subtract 1 to convert).
+enum SelectedMode : uint8_t {
+    MODE_PASS_PLAY = 0,
+    MODE_NOOB      = 1,
+    MODE_PRO       = 2,
+    MODE_HACKER    = 3,
+};
+
+// ------------------------------------------------------------
 // Commands
 // ------------------------------------------------------------
 enum C4Command : uint8_t {
@@ -121,6 +134,25 @@ enum C4Command : uint8_t {
                         // for CMD_ERROR's own handshake-free reporting.
 
     // ---- Motion Controller -> Game Brain ----
+    // Buttons are physically wired to Motion Controller (co-located
+    // with the shared screen), so Game Brain has no direct button
+    // access at all -- every human input arrives as one of these two.
+
+    CMD_MODE_SELECTED = 0x07, // Human confirmed a mode from the LOCAL
+                        // menu that Motion Controller draws and
+                        // navigates entirely on its own -- Game Brain
+                        // has no involvement until this arrives.
+                        // payload[0] = one of the SelectedMode values
+                        // below. Only meaningful while Game Brain is
+                        // in MENU state; starts the game on receipt.
+
+    CMD_BUTTON = 0x08,  // Forward a human button press during
+                        // HUMAN_TURN. payload[0] = 0:LEFT, 1:RIGHT,
+                        // 2:CONFIRM. Ignored by Game Brain if it
+                        // arrives in any other state (e.g. during
+                        // AI_TURN, there's nothing for a button press
+                        // to do).
+
     CMD_READY = 0x10,  // Homing complete, ready to accept commands.
                         // Sent once after boot-up homing finishes, and
                         // again after every CMD_HOME. Game Brain should
@@ -160,6 +192,17 @@ enum C4Error : uint8_t {
                                   // completed -- Game Brain sent a drop
                                   // too early in the boot sequence
 };
+
+// Game-Brain-side-only sentinel codes, never sent BY Motion Controller
+// (used with send_fault(), which just tells the display what to show --
+// not a real C4Error, but reuses the same payload slot):
+//   0xFF -- CMD_DONE arrived with a mismatched column (boards desynced)
+//   0xFE -- no CMD_READY after repeated CMD_HOME retries (likely UART
+//           noise/wiring, or Motion Controller not actually running)
+//   0xFD -- no CMD_DONE/CMD_ERROR after a CMD_DROP (unknown physical
+//           state -- deliberately NOT retried, since resending a DROP
+//           risks a second real piece dropping if the original actually
+//           succeeded and only the reply was lost)
 
 // ------------------------------------------------------------
 // build_frame: Construct a complete frame ready to write to Serial
