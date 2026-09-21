@@ -1,41 +1,56 @@
 #include <Arduino.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7789.h>
 #include "protocol.h"
 #include "board.h"
 #include "minimax.h"
 #include "difficulty.h"
 #include "input.h"
-#include "display.h"
-
-
 
 // ============================================================
 // Game Brain: Main State Machine
 // ============================================================
+// Game Brain owns NO display of its own -- the single shared screen
+// lives entirely on Motion Controller, which switches between two
+// mutually exclusive modes:
+//   MENU mode:  active from boot/homing through difficulty selection
+//   Roger mode: takes over once gameplay starts (idle while waiting
+//               for the human, with a column-selector indicator
+//               alongside it; thinking during AI's turn; good/bad
+//               move reactions; win/loss at game end) and stays
+//               active for the whole game
+// Every visual cue Game Brain wants shown is a fire-and-forget UART
+// command (CMD_MENU, CMD_SELECTOR, CMD_FACE, CMD_FAULT) -- Game Brain
+// never waits on or checks for a reply to any of them, so a missed
+// display cue can never stall the game.
+//
 // Both the human's button-selected column and the bot's search-
 // selected column flow through the SAME two states below
 // (AWAITING_DROP handles both identically) -- this mirrors the
 // Python test suite's design where difficulty is a config plugged
 // into one search function, not a separate code path per difficulty.
+//
 // ADJUST these UART pins/baud to match the actual wiring to Motion
 // Controller once Guyton's PCB is finalized -- placeholders for now.
 #define MOTION_UART_BAUD 115200
 #define MOTION_UART_RX   16
 #define MOTION_UART_TX   17
 
-Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+// TEMPORARY: skip the difficulty menu entirely so we can validate the
+// core AI <-> Motion Controller loop first (human picks a column, bot
+// searches and picks its own, both flow through the same drop/confirm
+// path) without menu/display work in the way. Boots straight into a
+// Pro-difficulty game the instant homing completes. Set to 0 once this
+// integration is confirmed working, to restore the real menu flow.
+#define SKIP_MENU_FOR_TESTING 1
 
 enum class GameBrainState {
     HOMING,         // sent CMD_HOME, waiting for Motion Controller's CMD_READY
     MENU,           // difficulty selection screen
     HUMAN_TURN,     // waiting for LEFT/RIGHT/CONFIRM to pick a column
-    AI_TURN,        // computing the bot's move (currently a placeholder --
-                     // see get_ai_move() below)
+    AI_TURN,        // computing the bot's move
     AWAITING_DROP,  // CMD_DROP sent, waiting for CMD_DONE or CMD_ERROR
     GAME_OVER,      // showing result, waiting for CONFIRM to play again
-    FAULT,          // Motion Controller reported an error -- halted,
-                     // requires a physical power cycle to recover
+    FAULT,          // a fault occurred -- halted, requires a physical
+                     // power cycle to recover
 };
 
 GameBrainState state = GameBrainState::HOMING;
@@ -57,28 +72,90 @@ C4Player pending_mover;               // who made the pending move -- captured
 // ------------------------------------------------------------
 // get_ai_move: real search now wired in
 // ------------------------------------------------------------
-// Opening book and (future) blunder-chance logic stay OUTSIDE
-// h_alphabeta_search, same separation as the Python test suite's
-// get_bot_move() -- the search function itself stays pure (always
-// returns its best move), and difficulty-flavor decisions (skip
-// search on move 1, occasionally play a worse move on Noob) wrap
-// around it here.
-uint8_t get_ai_move(const C4State* s, const DifficultyConfig* cfg) {
+SearchResult get_ai_move(const C4State* s, const DifficultyConfig* cfg) {
     bool board_empty = (s->bitboard[0] == 0 && s->bitboard[1] == 0);
     if (cfg->use_opening_book && board_empty) {
-        return 3; // center column
+        SearchResult r;
+        r.move = 3;
+        r.value = 0;
+        r.nodes = 0;
+        return r;
     }
-
     SearchResult result = h_alphabeta_search(*s, cfg->max_depth);
-    // TODO: Noob's blunder_chance_pct isn't applied yet -- once this
-    // is tested and trusted on real hardware, wrap this return with
-    // the same random-legal-move substitution logic the Python
-    // version used, gated on cfg->blunder_chance_pct.
-    return result.move;
+    // TODO: Noob's blunder_chance_pct isn't applied yet.
+    return result;
 }
 
 // ------------------------------------------------------------
-// send_drop: Build and transmit a CMD_DROP frame to Motion Controller
+// Fire-and-forget display commands to Motion Controller
+// ------------------------------------------------------------
+void send_face(FaceEvent evt) {
+    uint8_t payload[1] = { (uint8_t)evt };
+    uint8_t frame[C4_MAX_PAYLOAD + 5];
+    uint8_t len = build_frame(CMD_FACE, payload, 1, frame);
+    Serial2.write(frame, len);
+}
+
+void send_menu(uint8_t selected_index) {
+    uint8_t payload[1] = { selected_index };
+    uint8_t frame[C4_MAX_PAYLOAD + 5];
+    uint8_t len = build_frame(CMD_MENU, payload, 1, frame);
+    Serial2.write(frame, len);
+}
+
+void send_selector(uint8_t col) {
+    uint8_t payload[1] = { col };
+    uint8_t frame[C4_MAX_PAYLOAD + 5];
+    uint8_t len = build_frame(CMD_SELECTOR, payload, 1, frame);
+    Serial2.write(frame, len);
+}
+
+void send_fault(uint8_t error_code) {
+    uint8_t payload[1] = { error_code };
+    uint8_t frame[C4_MAX_PAYLOAD + 5];
+    uint8_t len = build_frame(CMD_FAULT, payload, 1, frame);
+    Serial2.write(frame, len);
+}
+
+// ------------------------------------------------------------
+// classify_and_send_reaction
+// ------------------------------------------------------------
+FaceEvent last_reaction_face = FACE_IDLE;
+
+void classify_and_send_reaction(const SearchResult& result) {
+    bool proven_win_for_ai = (result.value >= (int32_t)(1000000 - 42));
+
+    FaceEvent candidate = FACE_IDLE;
+    uint8_t trigger_chance = 0;
+
+    if (proven_win_for_ai) {
+        candidate = FACE_BAD_MOVE;
+        trigger_chance = 70;
+    } else if (result.value > 40) {
+        candidate = FACE_BAD_MOVE;
+        trigger_chance = 45;
+    } else if (result.value < -10) {
+        candidate = FACE_GOOD_MOVE;
+        trigger_chance = 45;
+    }
+
+    if (candidate == FACE_IDLE) {
+        last_reaction_face = FACE_IDLE;
+        return;
+    }
+
+    if (candidate == last_reaction_face) {
+        trigger_chance /= 2;
+    }
+
+    if ((uint8_t)random(100) < trigger_chance) {
+        send_face(candidate);
+        last_reaction_face = candidate;
+    }
+}
+
+// ------------------------------------------------------------
+// send_drop / send_home
 // ------------------------------------------------------------
 void send_drop(uint8_t col, C4Player mover) {
     uint8_t payload[2] = { col, (uint8_t)mover };
@@ -102,12 +179,9 @@ void send_home() {
 // setup / loop
 // ------------------------------------------------------------
 void setup() {
-    Serial.begin(115200); // USB serial, for debug prints only
-
+    Serial.begin(115200);
     Serial2.begin(MOTION_UART_BAUD, SERIAL_8N1, MOTION_UART_RX, MOTION_UART_TX);
 
-    tft.init(240, 320); // ADJUST resolution to match the actual 2.0"
-                          // panel's real pixel dimensions
     buttons.begin();
 
     difficulty = load_last_difficulty();
@@ -115,63 +189,68 @@ void setup() {
 
     c4_init(&board);
 
-    send_home(); // boot handshake: don't trust any prior gantry
-                  // position, always home before the first game
+    send_home();
+    Serial.println("Game Brain booted. Sent CMD_HOME, waiting for CMD_READY...");
 }
 
 void loop() {
-    // ---- UART receive: poll for a complete frame from Motion Controller ----
-    // This runs every loop() iteration regardless of state, since
-    // Motion Controller's reply could arrive at any time relative to
-    // where the state machine currently is -- but the frame's MEANING
-    // is only acted on if we're actually in a state expecting one
-    // (HOMING expects READY, AWAITING_DROP expects DONE/ERROR). A
-    // frame arriving in an unexpected state is logged and ignored
-    // rather than acted on, since acting on it would mean trusting
-    // a reply to a command we don't believe we sent.
     while (Serial2.available()) {
         if (parser.feed_byte(Serial2.read())) {
             if (parser.cmd == CMD_READY && state == GameBrainState::HOMING) {
+#if SKIP_MENU_FOR_TESTING
+                difficulty = DIFF_PRO;
+                c4_init(&board);
+                selected_col = 3;
+                state = GameBrainState::HUMAN_TURN;
+                send_face(FACE_IDLE);
+                send_selector(selected_col);
+                Serial.println("Received CMD_READY -- SKIP_MENU_FOR_TESTING: starting Pro game directly");
+#else
                 state = GameBrainState::MENU;
+                send_menu(menu_selected_index);
+                Serial.println("Received CMD_READY -- entering MENU");
+#endif
             } else if (parser.cmd == CMD_DONE && state == GameBrainState::AWAITING_DROP) {
-                // Sanity-check the echoed column matches what we sent --
-                // if it doesn't, something is badly desynced between the
-                // two boards, and continuing would risk updating the
-                // wrong column's state.
                 if (parser.payload[0] != pending_col) {
-                    // Mismatch: treat as a fault rather than guessing.
                     state = GameBrainState::FAULT;
-                    draw_fault(0xFF); // 0xFF: not a Motion Controller
-                                        // error code, but a Game-Brain-
-                                        // side desync detection
+                    send_fault(0xFF);
+                    Serial.println("FAULT: CMD_DONE column mismatch -- boards desynced");
                 } else {
+                    Serial.print("Received CMD_DONE for column ");
+                    Serial.println(pending_col);
+
                     c4_apply_move(&board, pending_col);
                     bool won = c4_is_win(board.bitboard[pending_mover]);
                     bool full = c4_is_full(&board);
 
                     if (won) {
-                        int result = (pending_mover == PLAYER_RED) ? +1 : -1;
-                        draw_game_over(result);
+                        send_face(pending_mover == PLAYER_RED ? FACE_LOSS : FACE_WIN);
                         state = GameBrainState::GAME_OVER;
+                        Serial.println(pending_mover == PLAYER_RED ? "Human WINS!" : "AI WINS!");
                     } else if (full) {
-                        draw_game_over(0);
+                        send_face(FACE_IDLE);
                         state = GameBrainState::GAME_OVER;
+                        Serial.println("Board full -- DRAW");
                     } else {
                         state = (pending_mover == PLAYER_RED)
                                     ? GameBrainState::AI_TURN
                                     : GameBrainState::HUMAN_TURN;
+                        Serial.println(state == GameBrainState::AI_TURN
+                                            ? "-> AI_TURN" : "-> HUMAN_TURN");
+                        if (state == GameBrainState::AI_TURN) {
+                            send_face(FACE_THINKING);
+                        } else {
+                            send_face(FACE_IDLE);
+                            send_selector(selected_col);
+                        }
                     }
                 }
             } else if (parser.cmd == CMD_ERROR && state == GameBrainState::AWAITING_DROP) {
-                draw_fault(parser.payload[0]);
+                send_fault(parser.payload[0]);
                 state = GameBrainState::FAULT;
+                Serial.print("FAULT: Motion Controller reported error code ");
+                Serial.println(parser.payload[0]);
             }
-            // Any other (cmd, state) combination: ignore. Notably,
-            // a stray CMD_READY while NOT in HOMING, or a stray
-            // CMD_DONE/CMD_ERROR while NOT in AWAITING_DROP, should
-            // never happen if both sides follow the protocol -- but
-            // silently ignoring rather than crashing is the safer
-            // failure mode if it ever does.
         }
     }
 
@@ -179,70 +258,65 @@ void loop() {
 
     switch (state) {
         case GameBrainState::HOMING:
-            // Nothing to do here but wait for CMD_READY, handled above.
             break;
 
         case GameBrainState::MENU:
             if (pressed == Button::LEFT && menu_selected_index > 0) {
                 menu_selected_index--;
-                draw_menu(menu_selected_index);
+                send_menu(menu_selected_index);
             } else if (pressed == Button::RIGHT && menu_selected_index < 2) {
                 menu_selected_index++;
-                draw_menu(menu_selected_index);
+                send_menu(menu_selected_index);
             } else if (pressed == Button::CONFIRM) {
                 difficulty = (Difficulty)menu_selected_index;
                 save_last_difficulty(difficulty);
                 c4_init(&board);
                 selected_col = 3;
-                draw_board(&board, selected_col);
-                state = GameBrainState::HUMAN_TURN; // RED (human) always
-                                                       // moves first
+                state = GameBrainState::HUMAN_TURN;
+                send_face(FACE_IDLE);
+                send_selector(selected_col);
             }
             break;
 
         case GameBrainState::HUMAN_TURN:
             if (pressed == Button::LEFT && selected_col > 0) {
                 selected_col--;
-                draw_board(&board, selected_col);
+                send_selector(selected_col);
             } else if (pressed == Button::RIGHT && selected_col < C4_WIDTH - 1) {
                 selected_col++;
-                draw_board(&board, selected_col);
+                send_selector(selected_col);
             } else if (pressed == Button::CONFIRM) {
                 if (c4_is_column_legal(&board, selected_col)) {
+                    Serial.print("Human chose column ");
+                    Serial.println(selected_col);
                     send_drop(selected_col, PLAYER_RED);
-                    draw_board(&board, 0xFF); // clear the selector
-                                                // indicator while we wait
                 }
-                // else: column is full, ignore the press -- could add
-                // a brief flash/beep here as feedback that the move
-                // was rejected, once the actual buzzer/LED hardware
-                // is decided
             }
             break;
 
         case GameBrainState::AI_TURN: {
-            uint8_t col = get_ai_move(&board, &DIFFICULTY_PRESETS[difficulty]);
-            send_drop(col, PLAYER_BLACK);
+            Serial.println("AI searching...");
+            SearchResult result = get_ai_move(&board, &DIFFICULTY_PRESETS[difficulty]);
+            Serial.print("AI chose column ");
+            Serial.print(result.move);
+            Serial.print("  value=");
+            Serial.println(result.value);
+            classify_and_send_reaction(result);
+            send_drop(result.move, PLAYER_BLACK);
             break;
         }
 
         case GameBrainState::AWAITING_DROP:
-            // Nothing to do here but wait for CMD_DONE/CMD_ERROR,
-            // handled in the UART receive block above.
             break;
 
         case GameBrainState::GAME_OVER:
             if (pressed == Button::CONFIRM) {
                 c4_init(&board);
-                send_home(); // re-home before the next game, same as boot
+                send_home();
             }
             break;
 
         case GameBrainState::FAULT:
-            // Deliberately no button handling here -- see display.h's
-            // draw_fault() comment. Recovery is a manual power cycle,
-            // not a software retry, since the mechanism itself needs
-            // a human to check on it.
             break;
     }
 }

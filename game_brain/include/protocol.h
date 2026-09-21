@@ -40,6 +40,27 @@
 //              where we expect it, something's wrong with the frame
 //              and it should be discarded
 
+// ------------------------------------------------------------
+// FaceEvent (payload of CMD_FACE)
+// ------------------------------------------------------------
+// Named from the robot personality's own point of view -- FACE_WIN/
+// FACE_LOSS are about the AI's own game outcome, not the human's.
+enum FaceEvent : uint8_t {
+    FACE_IDLE      = 0x00,  // default/neutral, also used to explicitly
+                              // clear a reaction back to idle
+    FACE_THINKING  = 0x01,  // sent right before the search starts --
+                              // Motion Controller owns how long this
+                              // plays; Game Brain doesn't track or care
+    FACE_GOOD_MOVE = 0x02,  // the AI's search, right after the human's
+                              // move, does NOT see a clear advantage --
+                              // reacting to the human having played well
+    FACE_BAD_MOVE  = 0x03,  // the AI's search, right after the human's
+                              // move, finds a forced win or a strong
+                              // heuristic advantage
+    FACE_WIN       = 0x04,  // the AI won the game
+    FACE_LOSS      = 0x05,  // the AI lost the game
+};
+
 #define C4_FRAME_START   0xAA
 #define C4_FRAME_END     0x55
 #define C4_MAX_PAYLOAD   4
@@ -64,6 +85,40 @@ enum C4Command : uint8_t {
                         // Motion Controller should treat an out-of-turn
                         // DROP as a protocol error regardless, not
                         // silently queue it.
+
+    CMD_FACE  = 0x03,  // Show a personality reaction on the display.
+                        // payload[0] = one of the FaceEvent values below.
+                        // FIRE-AND-FORGET: no reply expected, and Game
+                        // Brain does not wait for or check one. The whole
+                        // point of housing the display on Motion
+                        // Controller is so Game Brain's CPU stays fully
+                        // dedicated to search -- adding a handshake here
+                        // would defeat that. If a CMD_FACE frame gets
+                        // lost to noise, the worst outcome is a missed
+                        // animation cue, never a stuck game.
+
+    CMD_MENU  = 0x04,  // Show the difficulty menu screen.
+                        // payload[0] = currently highlighted index (0-2,
+                        // matching Difficulty enum in difficulty.h).
+                        // Sent once when entering MENU state, and again
+                        // every time LEFT/RIGHT changes the selection.
+                        // Fire-and-forget, same as CMD_FACE.
+
+    CMD_SELECTOR = 0x05, // Show/update the column-selector indicator
+                        // during the human's turn (Roger's screen mode,
+                        // not the menu). payload[0] = column (0-6). Sent
+                        // once entering HUMAN_TURN, and again every time
+                        // LEFT/RIGHT changes the selection. Fire-and-
+                        // forget, same as CMD_FACE.
+
+    CMD_FAULT = 0x06,  // Show a fault/error screen. payload[0] = an
+                        // error code -- either one of the C4Error values
+                        // below (when relaying a Motion-Controller-
+                        // reported fault) or 0xFF (a fault Game Brain
+                        // detected on its own, e.g. a CMD_DONE column
+                        // mismatch). Fire-and-forget, same as CMD_FACE --
+                        // this is purely a display cue, not a substitute
+                        // for CMD_ERROR's own handshake-free reporting.
 
     // ---- Motion Controller -> Game Brain ----
     CMD_READY = 0x10,  // Homing complete, ready to accept commands.
