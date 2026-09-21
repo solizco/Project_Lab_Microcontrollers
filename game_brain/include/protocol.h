@@ -197,8 +197,12 @@ enum C4Error : uint8_t {
 // (used with send_fault(), which just tells the display what to show --
 // not a real C4Error, but reuses the same payload slot):
 //   0xFF -- CMD_DONE arrived with a mismatched column (boards desynced)
-//   0xFE -- no CMD_READY after repeated CMD_HOME retries (likely UART
-//           noise/wiring, or Motion Controller not actually running)
+//   0xFE -- RESERVED, no longer sent. Used to mean "gave up retrying
+//           CMD_HOME" -- Game Brain now retries CMD_HOME indefinitely
+//           at boot instead of ever faulting out, so both boards can
+//           come up in either order without a manual reset. Left
+//           reserved rather than reassigned in case a bounded-retry
+//           path is reintroduced later.
 //   0xFD -- no CMD_DONE/CMD_ERROR after a CMD_DROP (unknown physical
 //           state -- deliberately NOT retried, since resending a DROP
 //           risks a second real piece dropping if the original actually

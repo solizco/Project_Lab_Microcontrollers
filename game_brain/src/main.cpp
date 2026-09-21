@@ -76,13 +76,55 @@ C4Player pending_mover;               // who made the pending move -- captured
                                         // flips inside c4_apply_move()
 
 // ------------------------------------------------------------
+// nearest_legal_column: find a legal column at or near `start`
+// ------------------------------------------------------------
+// Used whenever the selector needs to land on a real position -- at
+// the start of a human turn (matching the gantry, which is always
+// back at the limit switch after a post-drop re-home) and while
+// navigating with LEFT/RIGHT (so a full column can never be selected
+// at all, not just rejected on CONFIRM). Searches outward from
+// `start` in both directions; falls back to `start` itself only if
+// literally no column anywhere is legal (shouldn't happen -- a full
+// board ends the game before this could ever be called).
+uint8_t nearest_legal_column(uint8_t start) {
+    if (c4_is_column_legal(&board, start)) return start;
+    for (int offset = 1; offset < C4_WIDTH; offset++) {
+        if (start + offset < C4_WIDTH && c4_is_column_legal(&board, start + offset))
+            return start + offset;
+        if (start >= offset && c4_is_column_legal(&board, start - offset))
+            return start - offset;
+    }
+    return start;
+}
+
+// ------------------------------------------------------------
 // Comms resilience: timeouts for the two states that gate on a reply
 // ------------------------------------------------------------
 unsigned long state_entered_at = 0;
 uint8_t home_retry_count = 0;
-#define HOME_RETRY_TIMEOUT_MS 20000
-#define HOME_MAX_RETRIES       3
-#define DROP_TIMEOUT_MS        5000
+#define HOME_RETRY_TIMEOUT_MS 20000 // per-attempt patience before
+                                       // re-sending CMD_HOME
+// NOTE: no retry CAP for homing -- CMD_HOME is idempotent (re-homing
+// costs nothing but a wasted cycle if already homed), so Game Brain
+// just patiently keeps re-announcing itself every HOME_RETRY_TIMEOUT_MS
+// until Motion Controller actually responds, however long that takes
+// (slow boot, mid-development reflash, etc.). This lets both boards
+// "wait for each other" at startup indefinitely, rather than Game
+// Brain giving up and requiring a manual reset the moment Motion
+// Controller finally comes online. DROP_TIMEOUT_MS below is different
+// on purpose -- see its own comment where it's used.
+#define DROP_TIMEOUT_MS        15000 // a drop cycle now includes a full
+                                        // re-home afterward (mechanical
+                                        // position accuracy -- see
+                                        // Motion Controller's
+                                        // handle_drop_command comment),
+                                        // which can take several seconds
+                                        // in the worst case (traveling
+                                        // all the way back from column
+                                        // 6) on top of the move+drop
+                                        // itself -- this leaves generous
+                                        // margin over that combined
+                                        // worst case
 
 // ------------------------------------------------------------
 // get_ai_move: real search now wired in
@@ -248,12 +290,22 @@ void loop() {
 
             } else if (parser.cmd == CMD_BUTTON && state == GameBrainState::HUMAN_TURN) {
                 uint8_t btn = parser.payload[0]; // 0:LEFT, 1:RIGHT, 2:CONFIRM
-                if (btn == 0 && selected_col > 0) {
-                    selected_col--;
-                    send_selector(selected_col);
-                } else if (btn == 1 && selected_col < C4_WIDTH - 1) {
-                    selected_col++;
-                    send_selector(selected_col);
+                if (btn == 0) { // LEFT -- skip over any full columns
+                    for (int c = (int)selected_col - 1; c >= 0; c--) {
+                        if (c4_is_column_legal(&board, (uint8_t)c)) {
+                            selected_col = (uint8_t)c;
+                            send_selector(selected_col);
+                            break;
+                        }
+                    }
+                } else if (btn == 1) { // RIGHT -- skip over any full columns
+                    for (int c = (int)selected_col + 1; c < C4_WIDTH; c++) {
+                        if (c4_is_column_legal(&board, (uint8_t)c)) {
+                            selected_col = (uint8_t)c;
+                            send_selector(selected_col);
+                            break;
+                        }
+                    }
                 } else if (btn == 2) {
                     if (c4_is_column_legal(&board, selected_col)) {
                         C4Player mover = board.to_move; // whichever color's
@@ -321,6 +373,16 @@ void loop() {
                         if (state == GameBrainState::AI_TURN) {
                             send_face(FACE_THINKING);
                         } else {
+                            // Gantry is back at the limit switch after
+                            // the re-home that just happened post-drop
+                            // -- start the selector matching that real
+                            // physical position, not wherever the
+                            // human last navigated to on some earlier
+                            // turn. If column 0 itself happens to be
+                            // full, land on the nearest legal one
+                            // instead (and CMD_SELECTOR below will
+                            // physically move the gantry there).
+                            selected_col = nearest_legal_column(0);
                             send_face(FACE_IDLE);
                             send_selector(selected_col);
                         }
@@ -343,17 +405,10 @@ void loop() {
         case GameBrainState::HOMING:
             if (millis() - state_entered_at > HOME_RETRY_TIMEOUT_MS) {
                 home_retry_count++;
-                if (home_retry_count > HOME_MAX_RETRIES) {
-                    Serial.println("FAULT: no CMD_READY after repeated CMD_HOME retries.");
-                    Serial.println("Check UART wiring, shared ground, and whether Motion Controller is actually running.");
-                    send_fault(0xFE);
-                    state = GameBrainState::FAULT;
-                } else {
-                    Serial.print("No CMD_READY yet -- retrying CMD_HOME (attempt ");
-                    Serial.print(home_retry_count);
-                    Serial.println(")");
-                    send_home();
-                }
+                Serial.print("No CMD_READY yet -- retrying CMD_HOME (attempt ");
+                Serial.print(home_retry_count);
+                Serial.println("). Still waiting for Motion Controller...");
+                send_home();
             }
             break;
 

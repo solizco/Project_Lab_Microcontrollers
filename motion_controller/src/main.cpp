@@ -51,9 +51,15 @@
 
 #define MOTION_UART_BAUD 115200
 #define MOTION_UART_RX   14
-#define MOTION_UART_TX   2   // shares the onboard LED on most ESP32 dev
-                                // boards -- flickers with UART traffic,
-                                // cosmetic only
+#define MOTION_UART_TX   5   // GPIO5: normal bidirectional pin, no
+                                // boot-strapping role, no input-only
+                                // restriction. (GPIO2 was dropped after
+                                // it kept fighting the bootloader during
+                                // flashing; GPIO35 doesn't work at all --
+                                // it's one of the ESP32's input-only
+                                // pins, 34/35/36/39, with no output
+                                // driver on the silicon -- UART TX can
+                                // never work there, on any board.)
 
 // ---------- Motion constants -- measured values, not guesses ----------
 const float STEPS_PER_MM = 39.46;
@@ -312,6 +318,20 @@ bool debouncedPress(int pin, int &lastState) {
 enum ScreenMode { SCREEN_LOCAL_MENU, SCREEN_LOCAL_CONFIRM, SCREEN_ROGER, SCREEN_FAULT };
 ScreenMode screenMode = SCREEN_LOCAL_MENU;
 
+// ---------- CMD_READY beacon ----------
+// CMD_READY used to be one-shot: sent exactly once after boot-time
+// homing, never again unless Game Brain explicitly asked for a fresh
+// CMD_HOME. If that single message got missed (Game Brain not quite
+// listening yet, a UART hiccup), the only recovery was Game Brain's
+// own retry timer -- which also forces a full, physically unnecessary
+// re-home each time, even though Motion Controller is already sitting
+// there correctly homed and idle. Re-broadcasting periodically while
+// on the local menu is safe (Game Brain ignores CMD_READY outside its
+// own HOMING state) and lets the handshake complete in a couple of
+// seconds in almost all cases instead of relying on a slow fallback.
+unsigned long last_ready_beacon = 0;
+#define READY_BEACON_INTERVAL_MS 2000
+
 // ---------- Confirm screen: "You have selected X -- Start Game / Back" ----------
 int confirmIndex = 0; // 0 = Start Game, 1 = Back to Selection
 const char* confirmOptions[2] = { "START GAME", "BACK TO SELECTION" };
@@ -463,8 +483,25 @@ void handle_drop_command(uint8_t col, uint8_t color) {
     }
     moveToColumn(col);
     dropPiece(color);
-    send_done(col);
-    Serial.println("Sent CMD_DONE");
+
+    // Re-home after every drop -- this is purely a MECHANICAL accuracy
+    // measure, not how Game Brain learns the board state (that's
+    // already tracked reliably in its own software bitboard via
+    // CMD_DONE). Step-counting alone has no way to detect a missed
+    // step; re-homing after every move means each future column
+    // position starts from a freshly-verified real zero instead of
+    // letting any drift silently accumulate over a long game.
+    if (homeSlider()) {
+        send_done(col);
+        Serial.println("Sent CMD_DONE");
+    } else {
+        // The piece DID physically drop successfully -- but position
+        // tracking is now unreliable for any future move, so this is
+        // treated as a fault rather than silently continuing on a
+        // stepper position we can no longer trust.
+        send_error(ERR_STEPPER_STALL);
+        Serial.println("Post-drop re-home failed -- sent CMD_ERROR instead of CMD_DONE");
+    }
 }
 
 void setup() {
@@ -495,7 +532,12 @@ void setup() {
         pinMode(TFT_BLK, OUTPUT);
         digitalWrite(TFT_BLK, HIGH);
     }
-    gfx->begin(SPI_HZ);
+    if (!gfx->begin(SPI_HZ)) {
+        Serial.println("DISPLAY INIT FAILED: gfx->begin() returned false.");
+        Serial.println("Check TFT_SCK/MOSI/DC/CS/RST wiring and SPI_HZ before trusting anything drawn after this point.");
+    } else {
+        Serial.println("Display init OK (gfx->begin() returned true).");
+    }
     randomSeed(esp_random());
 
     if (!LittleFS.begin()) {
@@ -523,6 +565,7 @@ void setup() {
 
     if (homeSlider()) {
         send_ready();
+        last_ready_beacon = millis();
         Serial.println("Sent CMD_READY");
     } else {
         Serial.println("Homing failed at boot -- NOT sending CMD_READY.");
@@ -560,6 +603,15 @@ void loop() {
             } else if (parser.cmd == CMD_SELECTOR) {
                 selectorCol = parser.payload[0];
                 showSelector = true;
+                // Physically track the selection live, not just show
+                // it on screen -- moveToColumn() is a no-op if the
+                // gantry is already there (e.g. this exact column was
+                // just dropped in), and blocks briefly (a fraction of
+                // a second per column) while it's actually moving,
+                // which is the point: the human sees/feels the real
+                // drop position while still deciding, not just a
+                // screen indicator.
+                moveToColumn(selectorCol);
             } else if (parser.cmd == CMD_FAULT) {
                 drawFaultScreen(parser.payload[0]);
                 screenMode = SCREEN_FAULT;
@@ -577,6 +629,8 @@ void loop() {
         if (pR) menuMove(+1);
         if (pS) {
             confirmIndex = 0; // default highlight: "Start Game"
+            Serial.print("SELECT pressed on menu -- entering confirm screen for ");
+            Serial.println(modeNames[menuIndex]);
             drawConfirm();
             screenMode = SCREEN_LOCAL_CONFIRM;
         }
@@ -588,12 +642,15 @@ void loop() {
                 uint8_t mode = (uint8_t)menuIndex; // matches SelectedMode
                                                       // ordering in
                                                       // protocol.h exactly
+                Serial.print("SELECT pressed on confirm screen -- starting game, mode=");
+                Serial.println(mode);
                 send_mode_selected(mode);
                 setClip(CLIP_IDLE); // avoid a blank flash while waiting
                                       // for Game Brain's first real
                                       // CMD_FACE
                 screenMode = SCREEN_ROGER;
             } else { // Back to Selection
+                Serial.println("SELECT pressed on confirm screen -- back to menu");
                 drawMenu();
                 screenMode = SCREEN_LOCAL_MENU;
             }
@@ -608,5 +665,15 @@ void loop() {
 
     if (screenMode == SCREEN_ROGER) {
         advanceClipAnimation();
+    }
+
+    // ---- CMD_READY beacon: keep announcing readiness while on the
+    // local menu, so a missed first CMD_READY doesn't cost 20+ seconds
+    // to recover from ----
+    if (screenMode == SCREEN_LOCAL_MENU || screenMode == SCREEN_LOCAL_CONFIRM) {
+        if (millis() - last_ready_beacon > READY_BEACON_INTERVAL_MS) {
+            send_ready();
+            last_ready_beacon = millis();
+        }
     }
 }
