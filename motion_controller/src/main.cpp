@@ -158,8 +158,8 @@ void menuMove(int delta) {
 enum ClipSlot { CLIP_IDLE, CLIP_GOOD_MOVE, CLIP_BAD_MOVE, CLIP_WIN, CLIP_LOSS, CLIP_COUNT };
 #define MAX_VARIANTS 4
 #define FRAME_BUF_SIZE 24576
-#define CLIP_W 240
-#define CLIP_H 176
+#define CLIP_W 320
+#define CLIP_H 240
 const unsigned long frameInterval = 100; // 10 fps
 
 struct Clip {
@@ -263,7 +263,26 @@ ClipSlot face_event_to_clip(FaceEvent evt) {
 
 void advanceClipAnimation() {
     Clip &c = clips[currentClip];
-    if (c.variants == 0) return;
+
+    if (c.variants == 0) {
+        // No clip loaded for this slot -- either the filesystem image
+        // was never uploaded, or this specific clip never got
+        // converted from its source GIF into the JPG-frame-sequence
+        // format this code actually reads. Draw a visible placeholder
+        // instead of silently leaving whatever was on screen before --
+        // that's what was making a real screenMode change look like
+        // nothing happened at all.
+        static ClipSlot lastDrawnPlaceholder = CLIP_COUNT; // forces first draw
+        if (currentClip != lastDrawnPlaceholder) {
+            const char* names[CLIP_COUNT] = { "IDLE", "GOOD MOVE", "BAD MOVE", "WIN", "LOSS" };
+            gfx->fillScreen(COL_BG);
+            printCentered(names[currentClip], SCREEN_H / 2 - 10, 2, COL_ACCENT);
+            printCentered("(clip not loaded)", SCREEN_H / 2 + 20, 1, COL_DIM);
+            drawSelectorOverlay();
+            lastDrawnPlaceholder = currentClip;
+        }
+        return;
+    }
 
     unsigned long now = millis();
     if (now - lastFrameTime < frameInterval) return;

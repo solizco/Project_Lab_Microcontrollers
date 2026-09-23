@@ -4,6 +4,8 @@
 .vscode/launch.json
 .vscode/ipch
 .vscode/
+.convert_cache
+.uploadfs_cache
 
 # OS junk files
 Thumbs.db

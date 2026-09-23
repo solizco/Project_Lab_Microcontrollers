@@ -13,6 +13,11 @@ REM
 REM The -pix_fmt and -huffman flags matter: JPEGDEC on the ESP32 needs
 REM 4:2:0 chroma and standard Huffman tables. Without them the decoder
 REM returns error 2 and the screen shows blocky garbage.
+REM
+REM NOTE: no `pause` anywhere in this script -- it's invoked
+REM automatically (non-interactively) from PlatformIO's build hook now,
+REM and a pause here would block that build forever waiting for a
+REM keypress nobody's there to give.
 REM ---------------------------------------------------------------
 
 set FPS=15
@@ -23,7 +28,6 @@ set MAXLEN=2
 
 if not exist gifs (
   echo No gifs folder here. Run this from random_esp32_testing.
-  pause
   exit /b
 )
 
@@ -46,8 +50,7 @@ for /d %%C in (data\*) do (
 echo.
 powershell -nologo -command "'Total: {0:N2} MB  (keep under 1.8)' -f ((Get-ChildItem data -Recurse -File | Measure-Object Length -Sum).Sum/1MB)"
 echo.
-echo Now run:  platformio.exe run --target uploadfs --environment upesy_wroom
-pause
+echo Filesystem image will be built and uploaded automatically after this.
 exit /b
 
 REM ---------------------------------------------------------------
