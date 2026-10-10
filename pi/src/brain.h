@@ -41,6 +41,15 @@ public:
     void onButton(uint8_t btn);             // same path as a forwarded CMD_BUTTON
     // Start a game from the UI's own menu. Only works in MENU (gantry homed and ready).
     bool startGame(int mode);
+    // Start over from homing: clears a fault and re-sends CMD_HOME. Used when
+    // switching between the gantry and screen-only play.
+    void rehome();
+    void saveScreenMode(bool on, uint8_t input) {
+        settings_.screen_only = on; settings_.screen_input = input; settings_.save(settings_path_);
+    }
+    bool screenOnlySetting() const { return settings_.screen_only; }
+    uint8_t screenInputSetting() const { return settings_.screen_input; }
+    int  pendingCol() const { return pending_col_; }   // column of the drop in progress
 
     // ---- state the UI reads ----
     State     state = State::HOMING;

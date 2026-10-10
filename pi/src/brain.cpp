@@ -147,6 +147,15 @@ void Brain::onDone(int col) {
     else                          beginAiTurn();
 }
 
+void Brain::rehome() {
+    stopSearch();
+    faultCode = 0;
+    winner = -1;
+    inConfirm = false;
+    setFace(FACE_IDLE);
+    sendHome();
+}
+
 bool Brain::startGame(int m) {
     if (state != State::MENU || m < 0 || m > 3) return false;
     menuIndex = m;

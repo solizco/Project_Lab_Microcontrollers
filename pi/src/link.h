@@ -76,3 +76,26 @@ private:
     bool started_ = false, heard_pi_ = false;
     void enqueue(uint64_t delay, uint8_t cmd, const uint8_t* p, uint8_t n);
 };
+
+// ------------------------------------------------------------
+// Sits between Brain and the gantry. In screen-only mode every command goes
+// to a built-in simulator instead (the gantry never moves), but button
+// presses from the ESP32 still come through, so the physical buttons keep
+// working. Replies from the real gantry are ignored while screen-only.
+class SwitchLink : public Link {
+public:
+    explicit SwitchLink(Link& gantry) : gantry_(gantry) { screen.home_ms = 150; screen.drop_ms = 400; screen.boot_ms = 100; }
+    bool screenOnly = false;
+    SimLink screen;                       // the on-screen "gantry"
+    void send(uint8_t cmd, const uint8_t* payload, uint8_t len) override {
+        if (screenOnly) screen.send(cmd, payload, len); else gantry_.send(cmd, payload, len);
+    }
+    bool poll(Frame& out, uint64_t now_ms) override {
+        Frame f;
+        while (gantry_.poll(f, now_ms))   // always drain the real link
+            if (!screenOnly || f.cmd == CMD_BUTTON) { out = f; return true; }
+        return screenOnly && screen.poll(out, now_ms);
+    }
+private:
+    Link& gantry_;
+};

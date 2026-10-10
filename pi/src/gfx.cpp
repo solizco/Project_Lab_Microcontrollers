@@ -134,6 +134,21 @@ void Canvas::blitScaled(const uint16_t* src, int sw, int sh, bool flip180) {
     }
 }
 
+void Canvas::blit(const uint16_t* src, int sw, int sh, int x0, int y0, int dw, int dh, bool flip180) {
+    if (!src || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    for (int y = 0; y < dh; y++) {
+        int dy = y0 + y; if (dy < 0 || dy >= h) continue;
+        int sy = (int)((long)y * sh / dh); if (flip180) sy = sh - 1 - sy;
+        const uint16_t* srow = src + (size_t)sy * sw;
+        uint16_t* drow = &px[(size_t)dy * w];
+        for (int x = 0; x < dw; x++) {
+            int dx = x0 + x; if (dx < 0 || dx >= w) continue;
+            int sx = (int)((long)x * sw / dw); if (flip180) sx = sw - 1 - sx;
+            drow[dx] = srow[sx];
+        }
+    }
+}
+
 // ---------------- Display ----------------
 static int g_tty_for_restore = -1;
 

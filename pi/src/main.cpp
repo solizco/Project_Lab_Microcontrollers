@@ -257,7 +257,11 @@ int main(int argc, char** argv) {
 
     Settings settings; std::string spath = Settings::defaultPath();
     settings.load(spath);
-    Brain brain(*link, settings, spath, std::random_device{}());
+    // Screen-only play (Options > Screen only) swaps the gantry for an on-screen
+    // simulator while the ESP32's buttons keep working. Remembered across reboots.
+    SwitchLink sw(*link);
+    sw.screenOnly = settings.screen_only;
+    Brain brain(sw, settings, spath, std::random_device{}());
 
     // log to ~/c4_log.txt (the screen is busy with graphics) and keep the last lines for --text
     const char* h = getenv("HOME");
@@ -297,7 +301,7 @@ int main(int argc, char** argv) {
     Stats stats; std::string statsPath = Stats::defaultPath();
     stats.load(statsPath);
 
-    App app(brain, faces, stats, statsPath, sim);
+    App app(brain, faces, stats, statsPath, sim, &sw);
     app.faceMessage = faceMsg;
     if (board) app.showBoard = true;
     brain.buttonHook = [&app](uint8_t b) { return app.espButton(b); };
@@ -327,8 +331,17 @@ int main(int argc, char** argv) {
             display.close();
             restoreTty();
             if (logf) fclose(logf);
-            int rc = system("sudo -n shutdown -h now");
-            if (rc != 0) fprintf(stderr, "Could not shut down automatically. Run: sudo shutdown now\n");
+            // Full paths: the passwordless rule install_autostart.sh adds only covers these exact
+            // commands. -n = never ask for a password (fail instead of hanging on a hidden prompt).
+            const char* cmds[] = { "sudo -n /usr/sbin/shutdown -h now", "sudo -n /sbin/shutdown -h now",
+                                   "systemctl poweroff 2>/dev/null" };
+            int rc = -1;
+            for (const char* c : cmds) { rc = system(c); if (rc == 0) break; }
+            if (rc != 0) {
+                fprintf(stderr, "\nCould not power off without a password.\n"
+                                "Run install_autostart.sh again to allow it, or type: sudo shutdown now\n");
+                return 3;   // not 0: start.sh shows this message instead of silently exiting
+            }
             return 0;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(8));

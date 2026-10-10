@@ -26,6 +26,10 @@ bool Settings::load(const std::string& path) {
             char* end = nullptr;
             long v = strtol(val.c_str(), &end, 10);
             if (end != val.c_str() && v >= 0 && v <= 3) { tmp.last_mode = (uint8_t)v; any = true; }
+        } else if (key == "screen_input") {
+            if (val == "keyboard" || val == "buttons") { tmp.screen_input = (val == "buttons") ? 1 : 0; any = true; }
+        } else if (key == "screen_only") {
+            if (val == "1" || val == "0") { tmp.screen_only = (val == "1"); any = true; }
         }
     }
     if (!any) return false;
@@ -45,6 +49,8 @@ bool Settings::save(const std::string& path) const {
         std::ofstream f(tmp, std::ios::trunc);
         if (!f) return false;
         f << "last_mode=" << (int)last_mode << "\n";
+        f << "screen_only=" << (screen_only ? 1 : 0) << "\n";
+        f << "screen_input=" << (screen_input ? "buttons" : "keyboard") << "\n";
         f.flush();
         if (!f) return false;
     }

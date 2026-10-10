@@ -41,6 +41,8 @@ public:
     // Scale an RGB565 image (sw x sh) to cover this whole canvas (nearest neighbor),
     // optionally rotated 180.
     void blitScaled(const uint16_t* src, int sw, int sh, bool flip180);
+    // Draw an RGB565 image into the rectangle (x, y, dw, dh), nearest-neighbor scaled.
+    void blit(const uint16_t* src, int sw, int sh, int x, int y, int dw, int dh, bool flip180);
 
 private:
     inline void blend(int x, int y, uint16_t c, int a);
