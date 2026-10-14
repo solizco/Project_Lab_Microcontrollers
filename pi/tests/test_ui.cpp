@@ -13,6 +13,26 @@ static int g_fail = 0, g_pass = 0;
 #define CHECK(cond, ...) do { if (cond) { g_pass++; } else { g_fail++; \
     printf("  FAIL line %d: %s  ", __LINE__, #cond); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
+
+// Fails the test if a good/bad-move reaction is cut off before its last frame.
+struct ReactionWatch {
+    std::string playing; uint64_t start = 0; double total = 0; int seen = 0, interrupted = 0;
+    void tick(const FacePlayer& f, uint64_t t, bool inGame) {
+        bool reaction = inGame && (f.current == "good_move" || f.current == "bad_move");
+        if (!playing.empty() && f.current != playing) {
+            if ((double)(t - start) + 15 < total) {
+                interrupted++;
+                printf("  cut short: %s after %llu of %.0f ms, replaced by %s (t=%llu start=%llu)\n", playing.c_str(), (unsigned long long)(t - start), total, f.current.c_str(), (unsigned long long)t, (unsigned long long)start);
+            }
+            playing.clear();
+        }
+        if (reaction && playing.empty()) {
+            playing = f.current; start = t; seen++;
+            total = 0; for (double d : f.clips[f.clipIndex].durations) total += d;
+        }
+    }
+};
+
 static uint64_t fnv(const void* p, size_t n) {
     uint64_t h = 1469598103934665603ULL; const uint8_t* b = (const uint8_t*)p;
     for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ULL; }
@@ -34,7 +54,8 @@ static void testScreenOnly(const std::string& facesDir, const std::string& shots
     App app(brain, faces, stats, sp, false, &sw);
     brain.buttonHook = [&app](uint8_t b) { return app.espButton(b); };
     Canvas cv; uint64_t t = 1; int shot = 50;
-    auto step = [&](int ms) { for (int i = 0; i < ms / 10; i++) { t += 10; brain.update(t); app.frame(t, cv); if (brain.searching()) usleep(500); } };
+    ReactionWatch watch;
+    auto step = [&](int ms) { for (int i = 0; i < ms / 10; i++) { t += 10; brain.update(t); app.frame(t, cv); watch.tick(faces, t, app.screen == Screen::GAME); if (brain.searching()) usleep(500); } };
     auto esp = [&](uint8_t b) { gantry.pushButton(b); step(30); };    // a press on the real ESP32
     auto snap = [&](const char* name) { if (shots.empty()) return; app.draw(cv, t); char p[256]; snprintf(p, sizeof p, "%s/%02d_%s.ppm", shots.c_str(), shot++, name); savePPM(cv, p); };
 
@@ -80,6 +101,8 @@ static void testScreenOnly(const std::string& facesDir, const std::string& shots
         }
     }
     CHECK(brain.state == State::GAME_OVER, "screen-only game finished");
+    printf("  reactions seen: %d, cut short: %d\n", watch.seen, watch.interrupted);
+    CHECK(watch.interrupted == 0, "a reaction was cut short %d time(s)", watch.interrupted);
     snap("so_game_over");
     CHECK(gantry.drops_received == 0, "gantry got %d drops (must be 0)", gantry.drops_received);
     CHECK(gantry.last_selector == -1, "gantry never moved to a column");
@@ -130,6 +153,34 @@ static void testScreenOnly(const std::string& facesDir, const std::string& shots
     CHECK(sw.screen.drops_received == before && brain.state == State::HUMAN_TURN, "ESP32 button ignored in a keyboard game");
     app.key(A_SELECT); step(600);
     CHECK(sw.screen.drops_received == before + 1, "keyboard plays the keyboard game");
+}
+
+
+static void testReactionNotInterrupted(const std::string& facesDir) {
+    printf("a reaction always plays to the end\n");
+    SimLink sim; Settings set; Brain brain(sim, set, "/tmp/c4_ri_settings.conf", 3);
+    FacePlayer faces; std::string m; faces.loadFolder(facesDir, m);
+    Stats stats; App app(brain, faces, stats, "/tmp/c4_ri_stats.json", true);
+    Canvas cv; uint64_t t = 1;
+    auto run = [&](int ms) { for (int i = 0; i < ms / 10; i++) { t += 10; app.frame(t, cv); } };
+    run(100);
+    app.testFace(FACE_BAD_MOVE);
+    CHECK(faces.current == "bad_move", "reaction starts (%s)", faces.current.c_str());
+    double total = 0; for (double d : faces.clips[faces.clipIndex].durations) total += d;
+    run(100);
+    app.testFace(FACE_THINKING);                 // R.O.G.E.R starts thinking mid-reaction
+    app.testFace(FACE_IDLE);
+    app.testFace(FACE_THINKING);
+    run((int)total - 150);
+    CHECK(faces.current == "bad_move", "still the reaction just before its last frame (%s)", faces.current.c_str());
+    run(100);
+    CHECK(faces.current == "thinking", "then the waiting face, thinking (%s)", faces.current.c_str());
+    app.testFace(FACE_WIN);                      // thinking is not a reaction: switches right away
+    CHECK(faces.current == "roger_win", "win face right away when no reaction is playing (%s)", faces.current.c_str());
+    app.testFace(FACE_GOOD_MOVE); run(50); app.testFace(FACE_IDLE); run(50);
+    CHECK(faces.current == "good_move", "idle waits too (%s)", faces.current.c_str());
+    run(1500);
+    CHECK(faces.current == "idle", "reaction ends on idle (%s)", faces.current.c_str());
 }
 
 int main(int argc, char** argv) {
@@ -209,7 +260,8 @@ int main(int argc, char** argv) {
         Canvas cv;
         uint64_t t = 1;
         int shot = 0;
-        auto step = [&](int ms) { for (int i = 0; i < ms / 10; i++) { t += 10; brain.update(t); app.frame(t, cv); if (brain.searching()) usleep(500); } };
+        ReactionWatch watch;
+        auto step = [&](int ms) { for (int i = 0; i < ms / 10; i++) { t += 10; brain.update(t); app.frame(t, cv); watch.tick(faces, t, app.screen == Screen::GAME); if (brain.searching()) usleep(500); } };
         auto snap = [&](const char* name) { if (shots.empty()) return; app.draw(cv, t); char p[256]; snprintf(p, sizeof p, "%s/%02d_%s.ppm", shots.c_str(), shot++, name); savePPM(cv, p); };
         auto esp = [&](uint8_t b) { sim.pushButton(b); step(30); };
 
@@ -268,10 +320,13 @@ int main(int argc, char** argv) {
             }
         }
         CHECK(brain.state == State::GAME_OVER, "game finished (%s)", stateName(brain.state));
+        printf("  reactions seen: %d, cut short: %d\n", watch.seen, watch.interrupted);
+        CHECK(watch.interrupted == 0, "a reaction was cut short %d time(s)", watch.interrupted);
         if (mode != 0) CHECK(sawThinking, "thinking face played during the search");
         step(200);
         snap("game_over");
-        if (mode != 0 && brain.winner == 0) CHECK(faces.current == "roger_win", "win face (%s)", faces.current.c_str());
+        step(1200);                     // a reaction still playing at game over finishes first, then the win face
+        if (mode != 0 && brain.winner == 0) CHECK(faces.current == "roger_win", "win face after any reaction (%s)", faces.current.c_str());
         Stats check; check.load(sp);
         games = check.totals().games() + check.pvpGames;
         CHECK(games == 5, "result recorded once (4 test games + 1 real, got %d)", games);
@@ -297,6 +352,7 @@ int main(int argc, char** argv) {
         app.drawShuttingDown(cv); if (!shots.empty()) savePPM(cv, shots + "/99_shutting_down.ppm");
     }
 
+    testReactionNotInterrupted(facesDir);
     testScreenOnly(facesDir, shots);
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

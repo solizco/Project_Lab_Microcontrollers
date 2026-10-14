@@ -83,6 +83,7 @@ void App::handle(Act a) {
         else if (a == A_SELECT) {
             if (confirmSel_ == 1) { screen = Screen::MENU; break; }
             if (b_.startGame(confirmMode_)) {
+                facePending_ = false;
                 screen = Screen::GAME;
                 lastState_ = b_.state;
                 faceDirty_ = true;
@@ -184,10 +185,17 @@ std::string App::groupFor(FaceEvent f) const {
 
 void App::applyFace(FaceEvent f) {
     if (!faces_.loaded()) return;
+    // A reaction (good/bad move) always plays to its last frame. Anything asked
+    // for meanwhile (thinking, idle, win/loss, even another reaction) waits; the
+    // player drops to idle when the reaction ends and frame() then applies it.
+    if (faces_.oneShotPlaying() && faces_.current != faces_.idle) {
+        pendingFace_ = f; facePending_ = true;
+        return;
+    }
+    facePending_ = false;
     switch (f) {
     case FACE_IDLE:
-        // let a one-shot reaction finish on its own; it falls back to idle by itself
-        if (!(faces_.oneShotPlaying() && faces_.current != faces_.idle)) faces_.play(faces_.idle, 0);
+        faces_.play(faces_.idle, 0);
         break;
     case FACE_THINKING: faces_.play(groupFor(f), 0); break;          // loop while thinking
     case FACE_GOOD_MOVE:
@@ -254,7 +262,13 @@ bool App::frame(uint64_t now, Canvas& cv) {
     syncWithBrain(now);
     bool faceOnScreen = (screen == Screen::GAME && b_.mode != 0 && b_.state != State::FAULT) || screen == Screen::GIFTEST;
     bool changed = false;
-    if (faceOnScreen && faces_.loaded()) changed = faces_.update(now);
+    // Keep the face clock running even while no face is on screen, so a clip
+    // started later is timed from now (otherwise it would fast-forward).
+    if (faces_.loaded()) changed = faces_.update(now) && faceOnScreen;
+    if (facePending_ && faces_.loaded() && !faces_.oneShotPlaying()) {   // the reaction just finished
+        FaceEvent f = pendingFace_; facePending_ = false;
+        if (f != FACE_IDLE) { applyFace(f); changed = true; }           // idle is already playing
+    }
     std::string sig = signature(now);
     if (sig != lastSig_ || changed || faceDirty_) {
         lastSig_ = sig; faceDirty_ = false;

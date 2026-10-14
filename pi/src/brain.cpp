@@ -72,6 +72,7 @@ int Brain::nearestLegal(int start) const {
 
 // ---------------- game flow ----------------
 void Brain::beginGame(int m) {
+    stopSearch();
     mode = m;
     settings_.last_mode = (uint8_t)m;
     settings_.save(settings_path_);          // best effort; failure is not fatal
@@ -90,12 +91,24 @@ void Brain::beginHumanTurn() {
     sendSelector();
 }
 
+// The AI's search usually starts EARLY: the moment the human confirms a drop,
+// on the position after that move, while the gantry is still moving. That
+// search's value is R.O.G.E.R's judgement of the human's move, so his
+// reaction plays right after the press instead of after the gantry re-homes,
+// and his own move is normally ready the instant the piece lands.
 void Brain::beginAiTurn() {
-    setFace(FACE_THINKING);
     enter(State::AI_TURN);
-    stopSearch();                            // defensive: never two searches
+    if (resultReady_) { playAiMove(); return; }        // decided during the drop
+    setFace(FACE_THINKING);
+    if (!searching_) startSearch(board, false);         // opening move: nothing to react to
+}
+
+void Brain::startSearch(const Board& position, bool reactToHumanMove) {
+    stopSearch();                            // never two searches
     cancel_ = false; done_ = false; searching_ = true;
-    Board snapshot = board;                  // the thread searches a COPY
+    resultReady_ = false; reactPending_ = reactToHumanMove;
+    searchedState_ = position.state();
+    Board snapshot = position;               // the thread searches a COPY
     const DifficultyConfig cfg = *difficultyFor((uint8_t)mode);
     uint32_t seed = rng_();
     worker_ = std::thread([this, snapshot, cfg, seed] {
@@ -113,20 +126,35 @@ void Brain::beginAiTurn() {
 void Brain::stopSearch() {
     if (worker_.joinable()) { cancel_ = true; worker_.join(); }
     searching_ = false;
+    resultReady_ = false;
+    reactPending_ = false;
 }
 
-void Brain::finishSearch() {
+void Brain::harvestSearch() {
     if (worker_.joinable()) worker_.join();
     searching_ = false;
-    if (result_.aborted || !board.legal(result_.move)) {
-        fault(FAULT_DESYNC, "AI returned no legal move");
-        return;
-    }
+    if (result_.aborted) { resultReady_ = false; reactPending_ = false; return; }
+    resultReady_ = true;
     lastAiValue = result_.value; lastAiNodes = result_.nodes;
+    if (reactPending_) {
+        reactPending_ = false;
+        FaceEvent f = reaction_.classify(result_.value, rng_);
+        char b[96]; snprintf(b, sizeof b, "judged the human's move: value=%d -> %s", result_.value,
+                             f == FACE_GOOD_MOVE ? "good-move reaction" : f == FACE_BAD_MOVE ? "bad-move reaction" : "no reaction");
+        say(b);
+        if (f != FACE_IDLE) setFace(f);
+    }
+}
+
+void Brain::playAiMove() {
+    resultReady_ = false;
+    const C4State& now = board.state();
+    bool samePosition = now.bitboard[0] == searchedState_.bitboard[0] && now.bitboard[1] == searchedState_.bitboard[1];
+    if (!samePosition) { setFace(FACE_THINKING); startSearch(board, false); return; }   // stale: think again
+    if (!board.legal(result_.move)) { fault(FAULT_DESYNC, "AI returned no legal move"); return; }
     char b[96]; snprintf(b, sizeof b, "AI chose col %d value=%d nodes=%u", result_.move, result_.value, result_.nodes);
     say(b);
-    FaceEvent f = reaction_.classify(result_.value, rng_);
-    setFace((f == FACE_IDLE) ? FACE_IDLE : f);     // THINKING ends; a reaction plays if one fired
+    if (face == FACE_THINKING) setFace(FACE_IDLE);     // done thinking (a reaction, if any, keeps playing)
     sendDrop(result_.move, board.toMove());
 }
 
@@ -188,7 +216,12 @@ void Brain::onButton(uint8_t btn) {
             for (int c = selectedCol + 1; c < C4_WIDTH; c++)
                 if (board.legal(c)) { selectedCol = c; sendSelector(); break; }
         } else if (btn == BTN_CONFIRM && board.legal(selectedCol)) {
-            sendDrop(selectedCol, board.toMove());
+            int col = selectedCol;
+            sendDrop(col, board.toMove());
+            if (mode != 0) {                              // vs R.O.G.E.R: start judging this move now
+                Board after = board; after.play(col);
+                startSearch(after, true);
+            }
         }
         break;
 
@@ -223,6 +256,9 @@ void Brain::handleFrame(const Frame& f) {
 // ---------------- main tick ----------------
 void Brain::update(uint64_t now_ms) {
     now_ = now_ms;
+    // A finished search is harvested first, so a reaction to the human's move
+    // is set before that move's DONE (which may end the game) is processed.
+    if (searching_ && done_) harvestSearch();
     Frame f;
     while (link_.poll(f, now_)) handleFrame(f);
 
@@ -231,7 +267,8 @@ void Brain::update(uint64_t now_ms) {
         if (now_ - state_since_ > HOME_RETRY_MS) { say("no READY yet, re-sending CMD_HOME"); sendHome(); }
         break;
     case State::AI_TURN:
-        if (done_) finishSearch();
+        if (searching_ && done_) harvestSearch();
+        if (resultReady_) playAiMove();
         break;
     case State::AWAITING_DROP:
         if (now_ - state_since_ > DROP_TIMEOUT_MS)

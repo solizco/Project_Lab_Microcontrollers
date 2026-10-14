@@ -31,6 +31,7 @@ public:
     // 1 = Motion Controller buttons). Menus always accept both.
     void setScreenMode(bool on, uint8_t input);
     uint8_t screenInput() const { return screenInput_; }
+    void testFace(FaceEvent f) { applyFace(f); }   // tests only: same path as a face from the game
 
     void key(Act a);                 // keyboard on the Pi
     bool espButton(uint8_t btn);     // Brain::buttonHook: true = the menu used it
@@ -69,6 +70,8 @@ private:
     uint32_t lastFaceSeq_ = 0xFFFFFFFF;
     State lastState_ = State::HOMING;
     bool faceDirty_ = true;
+    bool facePending_ = false;           // a face change waiting for a reaction to finish
+    FaceEvent pendingFace_ = FACE_IDLE;
     std::string lastSig_;
 
     void handle(Act a);

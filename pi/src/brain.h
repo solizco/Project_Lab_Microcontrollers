@@ -88,6 +88,9 @@ private:
     std::atomic<bool> done_{false};
     bool searching_ = false;
     SearchResult result_{};
+    bool resultReady_ = false;    // result_ is a finished search of searchedState_
+    bool reactPending_ = false;   // the running search is judging the human's move
+    C4State searchedState_{};
 
     void say(const std::string& s) { if (log) log(s); }
     void setFace(FaceEvent f) { face = f; faceSeq++; }
@@ -100,7 +103,9 @@ private:
     void sendDrop(int col, int mover);
     void sendSelector();
     void fault(uint8_t code, const char* why);
-    void finishSearch();
+    void startSearch(const Board& position, bool reactToHumanMove);
+    void harvestSearch();         // search finished: judge the human's move, keep the result
+    void playAiMove();
     void stopSearch();
     int  nearestLegal(int start) const;
     void onDone(int col);

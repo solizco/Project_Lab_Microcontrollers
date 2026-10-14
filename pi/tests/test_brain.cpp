@@ -1,6 +1,7 @@
 // Whole-game tests of the Brain against SimLink, in simulated time.
 #include <cstdio>
 #include <string>
+#include <vector>
 #include <unistd.h>
 #include "../src/brain.h"
 
@@ -151,9 +152,46 @@ static void test_settings() {
     CHECK(!bad.load("/tmp/c4_settings_test/missing.conf"), "missing file -> defaults");
 }
 
+
+static void test_reaction_timing() {
+    printf("reaction to the human's move happens at the drop press, not after the gantry\n");
+    Rig r; r.sim.drop_ms = 3000;                         // slow gantry, like the real one
+    struct Ev { State st; std::string m; uint64_t t; };
+    std::vector<Ev> events;
+    r.b->log = [&](const std::string& m) { events.push_back({r.b->state, m, r.t}); };
+    r.until(State::MENU, 5000);
+    r.startMode(2);                                      // Pro
+    CHECK(r.until(State::HUMAN_TURN, 20000), "first human turn");
+    bool judgedOpening = false;
+    for (auto& e : events) if (e.m.find("judged") != std::string::npos) judgedOpening = true;
+    CHECK(!judgedOpening, "no reaction to R.O.G.E.R's own opening move");
+
+    int judgedDuringDrop = 0, judgedLate = 0, quickReplies = 0, humanMoves = 0;
+    for (int turn = 0; turn < 6 && r.b->state == State::HUMAN_TURN; turn++) {
+        events.clear();
+        r.press(BTN_CONFIRM);                            // human drops
+        humanMoves++;
+        for (int i = 0; i < 2000; i++) {
+            r.run(10);
+            if (r.b->state == State::HUMAN_TURN || r.b->state == State::GAME_OVER) break;
+        }
+        uint64_t aiTurnAt = 0, aiDropAt = 0;
+        for (auto& e : events) {
+            if (e.m.find("judged") != std::string::npos) { if (e.st == State::AWAITING_DROP) judgedDuringDrop++; else judgedLate++; }
+            if (e.m == "-> AI_TURN" && !aiTurnAt) aiTurnAt = e.t;                 // the human's piece has landed
+            if (e.m.find("SENT CMD_DROP") != std::string::npos && aiTurnAt && !aiDropAt) aiDropAt = e.t;
+        }
+        if (aiTurnAt && aiDropAt && aiDropAt - aiTurnAt <= 10) quickReplies++;
+        if (r.b->state == State::GAME_OVER) break;
+    }
+    CHECK(judgedDuringDrop == humanMoves && judgedLate == 0, "every human move judged while its piece was still dropping (%d/%d, late %d)",
+          judgedDuringDrop, humanMoves, judgedLate);
+    CHECK(quickReplies >= humanMoves - 1, "R.O.G.E.R's reply sent right after the piece landed (%d of %d)", quickReplies, humanMoves);
+}
+
 int main() {
     test_boot_and_menu(); test_pass_and_play_win(); test_full_column_skipped();
-    test_ai_game(); test_faults(); test_restart_and_cancel(); test_settings();
+    test_ai_game(); test_reaction_timing(); test_faults(); test_restart_and_cancel(); test_settings();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
