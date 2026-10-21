@@ -173,6 +173,12 @@ enum C4Command : uint8_t {
                         // state on the display rather than silently
                         // continuing with a board state that may not
                         // match physical reality.
+
+    CMD_SHUTDOWN = 0x13, // The shutdown button on Motion Controller was held
+                        // for 2 s. The Pi powers off cleanly (any state,
+                        // even mid-game). No payload. Sent once per hold,
+                        // repeated every second while still held in case
+                        // a frame is lost; the Pi treats repeats as one.
 };
 
 // ------------------------------------------------------------

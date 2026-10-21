@@ -23,6 +23,9 @@
 #      commands), so the game's Shut down menu works.
 #   6. Quiet boot: no boot text, rainbow splash or login banner, so the Pi
 #      goes straight from power-on to the game.
+#   7. Optional power button on the Pi itself (pin 5 / GPIO3 to pin 6 / GND):
+#      a press powers off cleanly. The usual shutdown button is on the Motion
+#      Controller (GPIO19, hold 2 s) and needs nothing here.
 # It asks for your password once (for sudo). Reboot afterwards.
 # Pressing Q in the game drops you to a normal shell.
 set -u
@@ -208,6 +211,26 @@ for CFG in /boot/firmware/config.txt /boot/config.txt; do
     fi
     break
 done
+
+# ---------------------------------------------------------------------
+say "7. Power button on the Pi (optional: pin 5 / GPIO3 to pin 6 / GND)"
+# The main shutdown button lives on the Motion Controller (GPIO19, hold 2 s);
+# the game powers off when it sees it. This optional Pi-side button works even
+# if the game is frozen: the kernel turns a press into a power-key event and
+# Linux powers off cleanly (its default action).
+for CFG in /boot/firmware/config.txt /boot/config.txt; do
+    [ -f "$CFG" ] || continue
+    if grep -q "^dtoverlay=gpio-shutdown" "$CFG"; then
+        echo "   Pi power button: already enabled"
+    else
+        sudo cp "$CFG" "$CFG.bak-connect4-button" && echo "dtoverlay=gpio-shutdown" | sudo tee -a "$CFG" >/dev/null \
+            && echo "   Pi power button: enabled (backup at $CFG.bak-connect4-button)"
+    fi
+    break
+done
+if [ -f /etc/systemd/logind.conf.d/connect4-button.conf ]; then          # an earlier version made it reboot
+    sudo rm -f /etc/systemd/logind.conf.d/connect4-button.conf && echo "   Pi power button: set back to power off (was reboot)"
+fi
 
 # ---------------------------------------------------------------------
 say "Checking for other programs that start at boot"

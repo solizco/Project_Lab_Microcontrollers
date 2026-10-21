@@ -42,14 +42,33 @@ If the screen stays on the text console, read ~/c4_log.txt or run
 
 5. SCREEN-ONLY PLAY (no gantry)
    Menu > Options > Screen only, then pick how to play:
+     Motion Controller buttons   the three buttons on the ESP32 (default)
      Keyboard                    the keyboard plugged into the Pi
-     Motion Controller buttons   the three buttons on the ESP32
    Games then play entirely on the display (full board, falling pieces) and
    the gantry stays parked. During a game only the chosen controls move
    pieces; menus always work with both. Remembered after a reboot. Turn it
    off from the same screen ("Turn off screen only"). Works with no ESP32
    plugged in (choose Keyboard), and from a gantry fault.
+   With Screen only OFF (normal play), the buttons and keyboard both work.
 
-6. POWERING OFF
+5b. COIN TOSS
+   Every game starts with a coin toss. Call Heads or Tails (vs R.O.G.E.R you
+   call; in 1v1 Player One calls). Whoever wins the toss moves first. Colors
+   never change: R.O.G.E.R / Player One are red, you / Player Two are black.
+
+6. R.O.G.E.R'S FACE
+   Idle loops during your turn. The moment you press drop he reacts (good or
+   bad move) and that reaction loops until your next turn; it always finishes
+   the loop it is on before idle comes back. ~/c4_log.txt shows each judgement.
+
+7. SHUTDOWN BUTTON (on the Motion Controller)
+   Pushbutton from ESP32 GPIO19 to GND. Hold it 2 seconds: the Pi shows
+   "Shutting down..." and powers off cleanly, from any screen, even mid-game.
+   Wait for the Pi's green light to stay off, then pull power or swap the SD.
+   (Needs the updated Motion Controller firmware and the game running.)
+   Optional backup: a button from Pi pin 5 (GPIO3) to pin 6 (GND) also powers
+   off cleanly, even if the game is frozen.
+
+8. POWERING OFF
    Menu > Options > Shut down > Shut down. Wait until the green light stays
    off, then cut the power. Never pull power while Linux is running.

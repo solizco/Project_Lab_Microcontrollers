@@ -6,6 +6,7 @@
 //   - moves to a column for CMD_SELECTOR (live tracking of the human's choice)
 //   - executes CMD_DROP: move, servo drop, RE-HOME, then CMD_DONE (or CMD_ERROR)
 //   - forwards the three buttons to the Pi as CMD_BUTTON, in EVERY state
+//   - shutdown button (GPIO19, hold 2 s): tells the Pi to power off cleanly
 // It knows nothing about Connect Four rules or what is on screen.
 //
 // Retired commands (CMD_FACE / CMD_MENU / CMD_FAULT / CMD_MODE_SELECTED)
@@ -24,6 +25,10 @@
 #define BTN_LEFT_PIN   21
 #define BTN_RIGHT_PIN  23
 #define BTN_SELECT_PIN 22
+// Shutdown button: hold 2 s and the Pi powers off cleanly (for swapping SD cards).
+// Wired from GPIO19 to GND, internal pull-up. GPIO19 was the old display's MOSI.
+#define BTN_SHUTDOWN_PIN 19
+#define SHUTDOWN_HOLD_MS 2000
 
 // UART to the Pi: Pi GPIO14 (TX) -> GPIO14 here (RX); Pi GPIO15 (RX) <- GPIO5 here (TX).
 // GPIO2 fights the bootloader and GPIO34/35/36/39 are input-only, so TX is GPIO5.
@@ -88,6 +93,7 @@ void send_frame(uint8_t cmd, const uint8_t* payload, uint8_t len) {
 void send_ready()           { send_frame(CMD_READY, nullptr, 0); }
 void send_done(uint8_t col) { uint8_t p[1] = { col };  send_frame(CMD_DONE, p, 1); }
 void send_error(uint8_t c)  { uint8_t p[1] = { c };    send_frame(CMD_ERROR, p, 1); }
+void send_shutdown()        { send_frame(CMD_SHUTDOWN, nullptr, 0); Serial.println("SENT: CMD_SHUTDOWN"); }
 void send_button(uint8_t b) { uint8_t p[1] = { b };    send_frame(CMD_BUTTON, p, 1);
                               Serial.print("SENT: CMD_BUTTON "); Serial.println(b); }
 
@@ -176,6 +182,7 @@ void setup() {
     pinMode(BTN_LEFT_PIN, INPUT_PULLUP);
     pinMode(BTN_RIGHT_PIN, INPUT_PULLUP);
     pinMode(BTN_SELECT_PIN, INPUT_PULLUP);
+    pinMode(BTN_SHUTDOWN_PIN, INPUT_PULLUP);
     lastLeft = digitalRead(BTN_LEFT_PIN);
     lastRight = digitalRead(BTN_RIGHT_PIN);
     lastSelect = digitalRead(BTN_SELECT_PIN);
@@ -213,6 +220,20 @@ void loop() {
     if (debouncedPress(BTN_LEFT_PIN, lastLeft))     send_button(0);
     if (debouncedPress(BTN_RIGHT_PIN, lastRight))   send_button(1);
     if (debouncedPress(BTN_SELECT_PIN, lastSelect)) send_button(2);
+
+    // ---- shutdown button: must be held SHUTDOWN_HOLD_MS (a bump does nothing) ----
+    static unsigned long shutdownDownSince = 0, lastShutdownSent = 0;
+    if (digitalRead(BTN_SHUTDOWN_PIN) == LOW) {
+        if (shutdownDownSince == 0) shutdownDownSince = millis() ? millis() : 1;
+        if (millis() - shutdownDownSince >= SHUTDOWN_HOLD_MS &&
+            (lastShutdownSent == 0 || millis() - lastShutdownSent >= 1000)) {
+            send_shutdown();                  // repeated each second while held, in case one is lost
+            lastShutdownSent = millis() ? millis() : 1;
+        }
+    } else {
+        shutdownDownSince = 0;
+        lastShutdownSent = 0;
+    }
 
     // ---- beacon until the Pi has spoken ----
     if (!heardPi && millis() - lastBeacon > BEACON_INTERVAL_MS) {
