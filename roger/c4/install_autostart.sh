@@ -89,6 +89,7 @@ case "$SRC_ROGER" in
         cp -r "$SRC_ROGER" "$DEST" || { echo "   copy failed"; exit 1; }
         rm -rf "$DEST/__pycache__"
         echo "   copied $SRC_ROGER -> $DEST"
+        echo "   game version: $("$DEST/c4/brain" --version 2>/dev/null || echo unknown)"
         ;;
     "$DEST")
         echo "   already running from $DEST, nothing to copy"

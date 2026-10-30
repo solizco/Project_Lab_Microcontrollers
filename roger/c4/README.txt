@@ -21,6 +21,10 @@ Connect Four Game Brain - prebuilt for Raspberry Pi Zero (ARMv6, 32-bit OS)
    Options:  --faces DIR   --rotate 180 (upside-down screen)
              --text (old text screen)   --board (small board always on)
 
+   ./brain --version      prints the build date. The same build date is shown
+                          small in the bottom right of the main menu, so you
+                          can tell the Pi is running the newest copy.
+
 3. FILES IT WRITES
    ~/c4_log.txt            what happened, which faces loaded, frame timing
    ~/connect4_stats.json   statistics (same file Finn's connect4.py uses)
@@ -55,6 +59,14 @@ If the screen stays on the text console, read ~/c4_log.txt or run
    Every game starts with a coin toss. Call Heads or Tails (vs R.O.G.E.R you
    call; in 1v1 Player One calls). Whoever wins the toss moves first. Colors
    never change: R.O.G.E.R / Player One are red, you / Player Two are black.
+
+5c. GAME OVER
+   When the game ends, any reaction still playing finishes its loop, then
+   R.O.G.E.R's win or loss GIF plays once all the way through. Then a results
+   screen: "YOU SUCK" (R.O.G.E.R won), "R.O.G.E.R SUCKS" (you won),
+   "PLAYER ONE WINS!" / "PLAYER TWO WINS!" (1v1) or "DRAW", with Play again.
+   Play again re-homes the gantry and goes back to mode selection.
+   Select during the GIF skips straight to the results screen.
 
 6. R.O.G.E.R'S FACE
    Idle loops during your turn. The moment you press drop he reacts (good or
