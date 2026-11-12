@@ -78,9 +78,56 @@ If the screen stays on the text console, read ~/c4_log.txt or run
    "Shutting down..." and powers off cleanly, from any screen, even mid-game.
    Wait for the Pi's green light to stay off, then pull power or swap the SD.
    (Needs the updated Motion Controller firmware and the game running.)
+   If the Pi refuses to power off, the game now stays running, shows the
+   reason in a red box, and logs every attempt in ~/c4_log.txt (lines
+   starting "power-off:"). The installer ends with "OK: power-off works
+   without a password" when the permission is in place.
    Optional backup: a button from Pi pin 5 (GPIO3) to pin 6 (GND) also powers
    off cleanly, even if the game is frozen.
 
 8. POWERING OFF
    Menu > Options > Shut down > Shut down. Wait until the green light stays
    off, then cut the power. Never pull power while Linux is running.
+
+8. FAULTS: RECOVER WITHOUT A POWER CYCLE
+   The red MOTION FAULT screen now has four choices (left/right, select):
+     Back to menu     re-homes the gantry and goes back to mode selection
+     Restart gantry   reboots the Motion Controller (like its EN button)
+     Link debug       see below
+     Options          screen only, GIF test, shut down
+   New fault codes:
+     0xFC  the Motion Controller can't hear the Pi (it keeps sending its
+           boot READY). Check the wire from Pi pin 8 to its GPIO14.
+     0xFB  the Motion Controller restarted mid-game. "brownout" as the
+           reason means its supply dipped when the motor or servo started.
+     0xFD  no reply after a drop (as before).
+
+9. LINK DEBUG (Options > Link debug, or from the fault screen)
+   Live view of the UART: frames and bytes each way, whether the board
+   hears the Pi, its firmware version, last restart reason, homed, limit
+   switch, corrupted frames, and the last few messages both ways. It pings
+   the board every 3 s. A one-line verdict says which wire to check.
+   Buttons along the bottom: Ping, Home, Column N (moves the gantry one
+   column each press), Drop in N (drops a RED piece there, game untouched),
+   Restart, Back. The tools work from the menu or a fault, not mid-game.
+   Everything shown there is also written to ~/c4_log.txt.
+   Needs Motion Controller firmware v2 for the board-side details; with
+   the old firmware you still get the Pi-side counts and traffic.
+
+10. FIXES IN THIS BUILD (Nov 9)
+   - Re-zeroing: the Motion Controller homes on the limit switch after
+     every drop in every mode (1v1 and vs R.O.G.E.R), so drift never builds
+     up. Then the next turn drives the gantry out to the selected column.
+   - If homing fails (for example after a cold power-up), the Pi restarts
+     the Motion Controller once by itself, the same as pressing its EN
+     button, before showing a fault.
+   - The main menu shows how long the gantry has been homing. Past 25 s it
+     points you to Options > Link debug.
+   - Screen only can be switched on or off at any time from the menu, even
+     while the gantry is still homing.
+   Motion Controller firmware (main.cpp from the same delivery):
+   - Buttons and the shutdown button keep working while the gantry moves
+     or homes, so the menus no longer look frozen during a long home.
+   - A failed home is noticed in about 9 s instead of 16 s.
+   - If boot homing fails, the board restarts itself (like pressing EN), at
+     most twice per power-up.

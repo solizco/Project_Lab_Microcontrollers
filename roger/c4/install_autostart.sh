@@ -178,7 +178,7 @@ TMP_RULE="$(mktemp)"
 {
     echo "# Added by install_autostart.sh (Connect 4): lets $ME power off / reboot without a"
     echo "# password so the game's Shut down menu works. Only these commands are allowed."
-    echo "$ME ALL=(root) NOPASSWD: /usr/sbin/shutdown, /sbin/shutdown, /usr/sbin/poweroff, /sbin/poweroff, /usr/sbin/reboot, /sbin/reboot"
+    echo "$ME ALL=(root) NOPASSWD: /usr/sbin/shutdown, /sbin/shutdown, /usr/sbin/poweroff, /sbin/poweroff, /usr/sbin/reboot, /sbin/reboot, /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /bin/systemctl poweroff, /bin/systemctl reboot"
 } > "$TMP_RULE"
 # A broken sudoers file can lock you out of sudo, so it is checked before it is installed.
 if sudo visudo -cf "$TMP_RULE" >/dev/null; then
@@ -249,6 +249,14 @@ for U in /etc/systemd/system/*.service; do
 done
 [ $FOUND -eq 0 ] && echo "   nothing else found"
 [ $FOUND -eq 1 ] && echo "   If one of these is Finn's Python menu, turn it off, or both will fight over the screen."
+
+say "Checking that the game can power off (shutdown button / Shut down menu)"
+sudo -k      # forget the password typed above, so this tests the rule the way the game uses it
+if sudo -n -l /usr/sbin/shutdown -h now >/dev/null 2>&1 || sudo -n -l /sbin/shutdown -h now >/dev/null 2>&1; then
+    echo "   OK: power-off works without a password"
+else
+    warn "FAILED: '$ME' still needs a password to power off. Look at: sudo cat $RULE"
+fi
 
 say "Done. Reboot to start the game:  sudo reboot"
 echo "   To shut down later: game menu > Options > Shut down. Wait for the green light to go off, then unplug."

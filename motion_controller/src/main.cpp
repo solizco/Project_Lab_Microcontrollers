@@ -7,6 +7,10 @@
 //   - executes CMD_DROP: move, servo drop, RE-HOME, then CMD_DONE (or CMD_ERROR)
 //   - forwards the three buttons to the Pi as CMD_BUTTON, in EVERY state
 //   - shutdown button (GPIO19, hold 2 s): tells the Pi to power off cleanly
+//   - keeps forwarding the buttons (and the shutdown button) WHILE the gantry
+//     moves or homes, so the Pi's menus never go dead during a long move
+//   - a cold start that can't home is retried, then the board restarts itself
+//     (what pressing EN used to fix), at most twice per power-up
 //   - debugging (firmware v2): reports what it is doing to the Pi as CMD_DEBUG
 //     frames, answers CMD_PING, restarts on CMD_RESET, and logs everything on
 //     the USB serial monitor (115200) with a status line every 5 s. Type ? in
@@ -18,6 +22,7 @@
 #include <Arduino.h>
 #include <ESP32Servo.h>
 #include <esp_system.h>
+#include <esp_attr.h>     // RTC_NOINIT_ATTR
 #include "protocol.h"
 
 // ---------- Pins (confirmed working on the validated rigs) ----------
@@ -43,14 +48,17 @@
 
 // ---------- Motion constants (measured) ----------
 const float STEPS_PER_MM = 39.46;
-const float FIRST_COLUMN_OFFSET_MM = 23.6;   // home (limit switch) to the center of column 0
-const float COLUMN_SPACING_MM = 33.3;        // center to center between columns
+const float FIRST_COLUMN_OFFSET_MM = 23.6;   // home (limit switch) to the FIRST column (column 0)
+const float COLUMN_SPACING_MM = 33.3;        // from one column to the next
 const int NUM_COLUMNS = 7;
 long columnSteps[NUM_COLUMNS];
 
 const unsigned int STEP_DELAY_US = 500;
 const unsigned int HOMING_STEP_DELAY_US = 800;
-#define MAX_HOMING_STEPS 20000
+// Full travel to column 6 is ~8800 steps; give up a little past that (~9 s at
+// homing speed) instead of 20000 steps (16 s), so a failed home is noticed and
+// retried quickly.
+#define MAX_HOMING_STEPS 11000
 
 // color 0 (RED) -> "Color A" angle; color 1 (BLACK) -> "Color B"
 const int SERVO_REST = 90;
@@ -151,6 +159,37 @@ void send_error(uint8_t c)  { uint8_t p[1] = { c };    send_frame(CMD_ERROR, p, 
 void send_shutdown()        { send_frame(CMD_SHUTDOWN, nullptr, 0); }
 void send_button(uint8_t b) { uint8_t p[1] = { b };    send_frame(CMD_BUTTON, p, 1); }
 
+// ---------- Buttons are read everywhere, even mid-move ----------
+// Moves and homing block for seconds. Before, the buttons were only read in
+// loop(), so during a long (or failing) home every press was lost and the
+// Pi's menus looked frozen. Now every step loop calls this every ~2 ms.
+unsigned long shutdownDownSince = 0, lastShutdownSent = 0, lastService = 0;
+void serviceInputs() {
+    if (debouncedPress(BTN_LEFT_PIN, lastLeft))     send_button(0);
+    if (debouncedPress(BTN_RIGHT_PIN, lastRight))   send_button(1);
+    if (debouncedPress(BTN_SELECT_PIN, lastSelect)) send_button(2);
+
+    // shutdown button: must be held SHUTDOWN_HOLD_MS (a bump does nothing)
+    if (digitalRead(BTN_SHUTDOWN_PIN) == LOW) {
+        if (shutdownDownSince == 0) shutdownDownSince = millis() ? millis() : 1;
+        if (millis() - shutdownDownSince >= SHUTDOWN_HOLD_MS &&
+            (lastShutdownSent == 0 || millis() - lastShutdownSent >= 1000)) {
+            send_shutdown();                  // repeated each second while held, in case one is lost
+            lastShutdownSent = millis() ? millis() : 1;
+        }
+    } else {
+        shutdownDownSince = 0;
+        lastShutdownSent = 0;
+    }
+}
+inline void serviceDuringMove() {
+    if (millis() - lastService >= 2) { lastService = millis(); serviceInputs(); }
+}
+void waitMs(unsigned long ms) {                // delay() that keeps the buttons alive
+    unsigned long t0 = millis();
+    while (millis() - t0 < ms) { serviceInputs(); delay(1); }
+}
+
 // ---------- Mechanics (unchanged from the validated sketch) ----------
 void doSteps(long numSteps, int dirValue, unsigned int delayUs) {
     digitalWrite(DIR_PIN, dirValue);
@@ -159,6 +198,7 @@ void doSteps(long numSteps, int dirValue, unsigned int delayUs) {
         delayMicroseconds(delayUs / 2);
         digitalWrite(STEP_PIN, LOW);
         delayMicroseconds(delayUs / 2);
+        serviceDuringMove();
     }
 }
 
@@ -172,6 +212,7 @@ void stepOnce(unsigned int delayUs) {
     delayMicroseconds(delayUs / 2);
     digitalWrite(STEP_PIN, LOW);
     delayMicroseconds(delayUs / 2);
+    serviceDuringMove();
 }
 
 bool homeFailed(long stepsTaken) {
@@ -231,10 +272,15 @@ bool homeSlider() {
 // Pressing the ESP's EN button did that toggle by accident. This does it on purpose.
 void armDriver() {
     digitalWrite(EN_PIN, HIGH);   // disable
-    delay(100);
+    waitMs(100);
     digitalWrite(EN_PIN, LOW);    // enable (TMC2209 EN is active low)
-    delay(100);
+    waitMs(100);
 }
+
+// Survives a software restart (not a power cut): how many times this power-up
+// has already restarted itself because boot homing failed.
+RTC_NOINIT_ATTR uint32_t bootRestarts;
+#define MAX_BOOT_RESTARTS 2
 
 // Home, and if it fails, re-arm the driver and try again.
 #define HOME_ATTEMPTS 3
@@ -244,7 +290,7 @@ bool homeWithRetry() {
             Serial.printf("[%7lu] Homing attempt %d of %d: re-arming the stepper driver first\n",
                           millis(), attempt, HOME_ATTEMPTS);
             armDriver();
-            delay(400);
+            waitMs(400);
         }
         if (homeSlider()) return true;
     }
@@ -269,11 +315,11 @@ void dropPiece(uint8_t color) {
     int selectAngle = (color == 0) ? SERVO_COLOR_A : SERVO_COLOR_B;
     int pushAngle = selectAngle + ((color == 0) ? SERVO_PUSH_OFFSET : -SERVO_PUSH_OFFSET);
     dispenserServo.write(selectAngle);
-    delay(250);
+    waitMs(250);
     dispenserServo.write(pushAngle);
-    delay(250);
+    waitMs(250);
     dispenserServo.write(SERVO_REST);
-    delay(200);
+    waitMs(200);
     Serial.printf("[%7lu] Servo drop done (%s)\n", millis(), color == 0 ? "RED" : "BLACK");
     send_debug(DBG_SERVO, color);
 }
@@ -379,10 +425,22 @@ void setup() {
 
     // On battery everything powers up at once (Pi, screen, servo, driver).
     // Let the supplies settle, then re-arm the driver before the first move.
-    delay(1500);
+    if (bootReason != 3) bootRestarts = 0;     // a real power-up / EN press: start counting again
+    waitMs(1500);
     armDriver();
 
     bootHomeOk = homeWithRetry();
+    if (!bootHomeOk && bootRestarts < MAX_BOOT_RESTARTS) {
+        // Pressing EN fixed this on a cold start; do the same thing ourselves.
+        bootRestarts++;
+        Serial.printf("[%7lu] Boot homing failed: restarting this board (%u of %d), same as pressing EN\n",
+                      millis(), (unsigned)bootRestarts, MAX_BOOT_RESTARTS);
+        Serial.flush(); Serial2.flush();
+        delay(200);
+        ESP.restart();
+        return;                               // (only reached in the host tests)
+    }
+    if (bootHomeOk) bootRestarts = 0;
     Serial.println(bootHomeOk ? "Boot homing OK. Beaconing CMD_READY until the Pi answers."
                               : "Boot homing FAILED. Beaconing CMD_ERROR until the Pi answers.");
     if (bootHomeOk) send_ready(); else send_error(ERR_STEPPER_STALL);
@@ -425,24 +483,8 @@ void loop() {
     pollConsole();
     if (millis() - lastStatusPrint >= STATUS_PRINT_MS) { printStatus(); lastStatusPrint = millis(); }
 
-    // ---- buttons: forwarded to the Pi in every state, nothing handled locally ----
-    if (debouncedPress(BTN_LEFT_PIN, lastLeft))     send_button(0);
-    if (debouncedPress(BTN_RIGHT_PIN, lastRight))   send_button(1);
-    if (debouncedPress(BTN_SELECT_PIN, lastSelect)) send_button(2);
-
-    // ---- shutdown button: must be held SHUTDOWN_HOLD_MS (a bump does nothing) ----
-    static unsigned long shutdownDownSince = 0, lastShutdownSent = 0;
-    if (digitalRead(BTN_SHUTDOWN_PIN) == LOW) {
-        if (shutdownDownSince == 0) shutdownDownSince = millis() ? millis() : 1;
-        if (millis() - shutdownDownSince >= SHUTDOWN_HOLD_MS &&
-            (lastShutdownSent == 0 || millis() - lastShutdownSent >= 1000)) {
-            send_shutdown();                  // repeated each second while held, in case one is lost
-            lastShutdownSent = millis() ? millis() : 1;
-        }
-    } else {
-        shutdownDownSince = 0;
-        lastShutdownSent = 0;
-    }
+    // ---- buttons and the shutdown button: forwarded to the Pi in every state ----
+    serviceInputs();
 
     // ---- beacon until the Pi has spoken ----
     if (!heardPi && millis() - lastBeacon > BEACON_INTERVAL_MS) {
