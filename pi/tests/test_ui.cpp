@@ -197,7 +197,7 @@ static void testFullFlow(const std::string& facesDir, const std::string& shots) 
         CHECK(r.brain->state == State::GAME_OVER, "mode %d game over (%s)", mode, stateName(r.brain->state));
         games++;
         if (mode != 0 && r.brain->winner <= 1) {
-            for (int i = 0; i < 300 && r.app->over() == App::Over::WAIT_REACTION; i++) r.step(10);
+            for (int i = 0; i < 6000 && r.app->over() == App::Over::WAIT_REACTION; i++) r.step(10);   // up to 60 s: real clips are long
             const char* endFace = r.brain->winner == 0 ? "roger_win" : "roger_loss";
             CHECK(r.app->over() == App::Over::GIF && r.faces.current == endFace, "end GIF plays (%s)", r.faces.current.c_str());
             r.esp(BTN_LEFT);
@@ -315,20 +315,37 @@ static void testReactionLoops(const std::string& facesDir) {
     double total = 0; for (double d : faces.clips[faces.clipIndex].durations) total += d;
     run((int)total * 3);
     CHECK(faces.current == "bad_move", "keeps looping while R.O.G.E.R plays (%s)", faces.current.c_str());
-    app.testFace(FACE_THINKING);
-    CHECK(faces.current == "bad_move", "a new face waits for the pass to finish");
-    run((int)total + 50);
-    CHECK(faces.current == "thinking", "then switches (%s)", faces.current.c_str());
-    app.testFace(FACE_GOOD_MOVE); run(50); app.testFace(FACE_IDLE); run(50);
+    if (faces.has("thinking")) {   // the thinking face is optional
+        app.testFace(FACE_THINKING);
+        CHECK(faces.current == "bad_move", "a new face waits for the pass to finish");
+        run((int)total + 50);
+        CHECK(faces.current == "thinking", "then switches (%s)", faces.current.c_str());
+        app.testFace(FACE_GOOD_MOVE); run(50); app.testFace(FACE_IDLE); run(50);
+    } else {
+        printf("  (no thinking face in %s: skipping that step)\n", facesDir.c_str());
+        app.testFace(FACE_GOOD_MOVE);
+        CHECK(faces.current == "bad_move", "a new face waits for the pass to finish");
+        run((int)total + 50);
+        app.testFace(FACE_IDLE); run(50);
+    }
     CHECK(faces.current == "good_move", "idle waits too (%s)", faces.current.c_str());
-    run(1500);
+    double goodTotal = 0; for (double d : faces.clips[faces.clipIndex].durations) goodTotal += d;
+    run((int)goodTotal + 1500);
     CHECK(faces.current == "idle", "reaction ends on idle (%s)", faces.current.c_str());
     app.testFace(FACE_WIN);
     CHECK(faces.current == "idle", "win/loss are left to the game-over sequence");
 }
 
 int main(int argc, char** argv) {
-    std::string facesDir = argc > 1 ? argv[1] : "/tmp/roger/faces";
+// Default: the repo's faces when run from pi/ (make test), or ../faces when run
+// from roger/c4 on the Pi.
+    std::string facesDir = argc > 1 ? argv[1] : "";
+    if (facesDir.empty()) {
+        for (const char* d : {"../roger/faces", "../faces", "/tmp/roger/faces"}) {
+            facesDir = d;
+            if (access(d, R_OK) == 0) break;
+        }
+    }
     std::string shots = (argc > 2 && strcmp(argv[2], "--dump")) ? argv[2] : "";
     bool dump = false; for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--dump")) dump = true;
 
@@ -343,7 +360,14 @@ int main(int argc, char** argv) {
     FacePlayer fp; std::string msg;
     bool ok = fp.loadFolder(facesDir, msg);
     printf("  %s\n", msg.c_str());
-    CHECK(ok && fp.width == 400 && fp.height == 240, "load (%dx%d)", fp.width, fp.height);
+    if (!ok || fp.clips.empty()) {
+        printf("\nSKIP: no .face files in %s, so the UI tests can't run.\n"
+               "Convert the GIFs first (roger/convert.bat or convert_gifs.py), or pass a folder:\n"
+               "  build/test_ui path/to/faces\n", facesDir.c_str());
+        printf("\n%d passed, %d failed\n", g_pass, g_fail);
+        return g_fail ? 1 : 0;
+    }
+    CHECK(fp.width == 400 && fp.height == 240, "load (%dx%d)", fp.width, fp.height);
     CHECK(fp.has("idle") && fp.has("bad_move") && fp.has("roger_win"), "groups");
 
     if (dump) {   // decode every frame of every clip

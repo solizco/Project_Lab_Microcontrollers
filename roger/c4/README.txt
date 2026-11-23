@@ -88,13 +88,15 @@ Screen: micro-HDMI port HDMI0 (next to the USB-C power port). Power: 5 V at 3 A 
 2. ON THE PI
    rm -rf ~/c4 && cp -r /boot/firmware/c4 ~/c4
    cd ~/c4
-   chmod +x brain bench test_ai test_brain
+   chmod +x brain bench test_ai test_brain test_motion test_pwm test_ui
+   ./brain --gpio         the real gantry, driven by the Pi 4's own GPIO (pins.conf)
    ./brain --sim          full game on the screen with a fake gantry
-   ./brain --serial /dev/serial0     with the real ESP32 (Pi 4; Pi 5: /dev/ttyAMA0)
+   ./brain --serial /dev/serial0     old setup: the ESP32 Motion Controller (Pi 5: /dev/ttyAMA0)
 
    Keyboard: arrows or a/d move, Enter select, Esc back, B small board,
              Q quit. On Statistics: T test game, C twice = clear.
-   ESP32 buttons: left/right move, select chooses.
+   Gantry buttons (Pi 4 GPIO, or the ESP32's in the old setup): left/right move,
+   select chooses (or press left and right together).
 
    Options:  --faces DIR   --rotate 180 (upside-down screen)
              --text (old text screen)   --board (small board always on)
@@ -118,13 +120,14 @@ If the screen stays on the text console, read ~/c4_log.txt or run
    game on the screen at every boot (no boot text, no login), restarts it if
    it crashes, lets the Shut down menu power off without a password, and
    Q drops you to a command line.
-   Change how it starts: run it again with --sim or --serial,
+   Change how it starts: run it again with --gpio, --sim or --serial,
                          or edit BRAIN_ARGS in ~/roger/c4/start.sh
    Turn it off:          bash ~/roger/c4/install_autostart.sh --remove
 
 5. SCREEN-ONLY PLAY (no gantry)
    Menu > Options > Screen only, then pick how to play:
-     Motion Controller buttons   the three buttons on the ESP32 (default)
+     Motion Controller buttons   the gantry's buttons (default): on the Pi 4's
+                                 GPIO, or on the ESP32 in the old setup
      Keyboard                    the keyboard plugged into the Pi
    Games then play entirely on the display (full board, falling pieces) and
    the gantry stays parked. During a game only the chosen controls move
@@ -154,11 +157,12 @@ If the screen stays on the text console, read ~/c4_log.txt or run
    bad move) and that reaction loops until your next turn; it always finishes
    the loop it is on before idle comes back. ~/c4_log.txt shows each judgement.
 
-7. SHUTDOWN BUTTON (on the Motion Controller)
-   Pushbutton from ESP32 GPIO19 to GND. Hold it 2 seconds: the Pi shows
+7. SHUTDOWN BUTTON
+   Pi 4: pushbutton from BTN_SHUTDOWN in pins.conf (GPIO25) to GND.
+   Old ESP32 setup: pushbutton from ESP32 GPIO19 to GND. Hold it 2 seconds: the Pi shows
    "Shutting down..." and powers off cleanly, from any screen, even mid-game.
    Wait for the Pi's green light to stay off, then pull power or swap the SD.
-   (Needs the updated Motion Controller firmware and the game running.)
+   (Needs the game running; in the old setup, also the updated ESP32 firmware.)
    If the Pi refuses to power off, the game now stays running, shows the
    reason in a red box, and logs every attempt in ~/c4_log.txt (lines
    starting "power-off:"). The installer ends with "OK: power-off works
@@ -170,20 +174,20 @@ If the screen stays on the text console, read ~/c4_log.txt or run
    Menu > Options > Shut down > Shut down. Wait until the green light stays
    off, then cut the power. Never pull power while Linux is running.
 
-8. FAULTS: RECOVER WITHOUT A POWER CYCLE
+9. FAULTS: RECOVER WITHOUT A POWER CYCLE
    The red MOTION FAULT screen now has four choices (left/right, select):
      Back to menu     re-homes the gantry and goes back to mode selection
      Restart gantry   reboots the Motion Controller (like its EN button)
      Link debug       see below
      Options          screen only, GIF test, shut down
-   New fault codes:
+   Fault codes from the old ESP32 setup:
      0xFC  the Motion Controller can't hear the Pi (it keeps sending its
            boot READY). Check the wire from Pi pin 8 to its GPIO14.
      0xFB  the Motion Controller restarted mid-game. "brownout" as the
            reason means its supply dipped when the motor or servo started.
      0xFD  no reply after a drop (as before).
 
-9. LINK DEBUG (Options > Link debug, or from the fault screen)
+10. LINK DEBUG (Options > Link debug, or from the fault screen)
    Live view of the UART: frames and bytes each way, whether the board
    hears the Pi, its firmware version, last restart reason, homed, limit
    switch, corrupted frames, and the last few messages both ways. It pings
@@ -195,7 +199,7 @@ If the screen stays on the text console, read ~/c4_log.txt or run
    Needs Motion Controller firmware v2 for the board-side details; with
    the old firmware you still get the Pi-side counts and traffic.
 
-10. FIXES IN THIS BUILD (Nov 9)
+11. FIXES IN THE NOV 9 BUILD (ESP32 setup)
    - Re-zeroing: the Motion Controller homes on the limit switch after
      every drop in every mode (1v1 and vs R.O.G.E.R), so drift never builds
      up. Then the next turn drives the gantry out to the selected column.
@@ -213,7 +217,7 @@ If the screen stays on the text console, read ~/c4_log.txt or run
    - If boot homing fails, the board restarts itself (like pressing EN), at
      most twice per power-up.
 
-11. IF THE GANTRY ONLY HOMES AFTER PRESSING EN ON THE ESP32
+12. IF THE GANTRY ONLY HOMES AFTER PRESSING EN ON THE ESP32 (old ESP32 setup only)
    Watch two things after a cold power-up on battery (USB unplugged):
      - the ESP32's blue LED (firmware build 3): dark = the ESP32 is not
        running at all. Fast blink = homing, solid = homed, slow blink =

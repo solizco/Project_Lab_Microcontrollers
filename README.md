@@ -41,7 +41,7 @@ The original proposal used a single ESP32-C3 with a 5″ RA8875 touchscreen. The
 - **Game Brain** ran the Connect Four rules, the minimax bot and the 2.0″ ST7789 display.
 - **Motion Controller** ran the gantry: STEP/DIR to a TMC2209 driver, the drop servo, the limit switch and the three buttons.
 
-The boards talked through a small framed protocol (`protocol.h`). Every message is fire-and-forget, so a lost frame costs a missed screen update, never a stuck game. During this stage the menu and screen moved over to the Motion Controller. The team also tried playing R.O.G.E.R.'s face animations from the ESP32's flash (`random_esp32_testing/`).
+The boards talked through a small framed protocol (`protocol.h`). Every message is fire-and-forget, so a lost frame costs a missed screen update, never a stuck game. During this stage the menu and screen moved over to the Motion Controller. The team also tried playing R.O.G.E.R.'s face animations from the ESP32's flash (`archive/esp32_face_player_test/`).
 
 **Why it changed:** the face animations needed a much bigger screen than the 2.0″ TFT. A Raspberry Pi Zero can drive a 5″ 800×480 HDMI display directly, so the Pi Zero took over the Game Brain role. The existing C++ game and AI code moved over with it.
 
@@ -100,9 +100,9 @@ A failed re-home after a drop no longer ends the game. Removing the second board
 
 | Path | Design | What it is |
 |---|---|---|
-| `MicroControllersTestSuitev2_fixed.ipynb` | all | Python prototype of the bot: game class, minimax search, heuristic tuning, benchmarks and a human-vs-AI playtest. The C++ search in every design is based on it. |
-| `game_brain (unused now)/` | 1 | PlatformIO project for the ESP32 Game Brain: bitboard board (`board.h`), minimax (`minimax.h`), difficulty presets, ST7789 display and the UART protocol. Retired when the Pi Zero took over. |
-| `random_esp32_testing/` | 1 | ESP32 experiment playing face clips from LittleFS flash (packed MJPEG clips; per-file opens cost about 60 ms each). |
+| `ai_prototype/minimax_test_suite.ipynb` | all | Python prototype of the bot: game class, minimax search, heuristic tuning, benchmarks and a human-vs-AI playtest. The C++ search in every design is based on it. |
+| `archive/esp32_game_brain/` | 1 | PlatformIO project for the ESP32 Game Brain: bitboard board (`board.h`), minimax (`minimax.h`), difficulty presets, ST7789 display and the UART protocol. Retired when the Pi Zero took over. |
+| `archive/esp32_face_player_test/` | 1 | ESP32 experiment playing face clips from LittleFS flash (packed MJPEG clips; per-file opens cost about 60 ms each). |
 | `pi/src/`, `pi/tests/` | 2 → **4** | C++ Game Brain, written for the Pi Zero and carried through to the final Pi 4: AI (`ai.*`), rules and difficulty (`game.*`), state machine (`brain.*`), UART link plus a simulated gantry (`link.*`), framebuffer graphics (`gfx.*`), faces (`faces.*`), stats and settings. The Pi 4 files are `motion.*` (the gantry, moved from the ESP32), `pi_hal.*` (GPIO and hardware PWM) and `pins.*` (reads `pins.conf`). Tests cover the AI, link, state machine, gantry, PWM and UI. See [`pi/README.md`](pi/README.md). |
 | `pi/Makefile`, `pi/tools/` | 2 → **4** | `make && make test` on a laptop. `tools/build_pi.sh pi64` cross-compiles the Pi 4/5 binaries (and with no argument, the Pi Zero ones) using Zig. `install_autostart.sh` starts the game at boot. |
 | `pi/motion_controller/` | 2–3 | A copy of the motion-only ESP32 firmware kept alongside the Pi source: breadboard wiring, different servo defaults (90 / 60 / 75 / 120 / 105 / 250), and a `host_test/` harness that runs it on a PC. |
@@ -113,7 +113,9 @@ A failed re-home after a drop no longer ends the game. Removing the second board
 | `roger/pins.conf` | 4 | GPIO wiring for the Pi 4, plus gantry, servo, homing and button tuning. Read at start-up. |
 | `motion_controller/` | 1 → 3 | The ESP32 Motion Controller firmware in its final state (build 3), for the custom PCB wiring (`src/main.cpp`) and the breadboard wiring (`variants/breadboard_pins/`). Covers homing with automatic retry, drops, button and shutdown forwarding, link debugging and servo calibration. Retired in Design 4. See [`motion_controller/README.md`](motion_controller/README.md). |
 
-`pi/` builds cleanly with `make`. On a PC, the AI, link, state machine (163 checks), gantry (109 checks) and PWM tests all pass. Cross-compiling with `tools/build_pi.sh pi64` reproduces the `roger/c4/` binaries.
+`pi/` builds cleanly with `make`, and `make test` passes all six test suites on a PC: AI, link, state machine, gantry (against a simulated carriage), PWM and UI (using the faces in `roger/faces`). Cross-compiling with `tools/build_pi.sh pi64` reproduces the `roger/c4/` binaries.
+
+**Each design had its own wiring and servo calibration.** That's why the three copies of the ESP32 firmware carry different pins and servo values. The final values are the Pi 4's: pins in `roger/pins.conf`, servo positions saved from the on-screen calibration menu.
 
 ---
 
@@ -143,8 +145,20 @@ The full definitions are in `motion_controller/src/protocol.h`.
 
 ---
 
+## Getting started
+
+- **Try it on a PC:** `cd pi && make && make test && ./brain --sim` (arrow keys move, Enter selects).
+- **Set up a Pi 4:** see [`roger/c4/README.txt`](roger/c4/README.txt). Copy the `roger` folder to the SD card, run `install_autostart.sh --gpio`, then fill in `roger/pins.conf`.
+- **Change the faces:** put GIFs in `roger/gifs/` and run `roger/convert.bat` (or `convert_gifs.py`) to regenerate `roger/faces/`.
+
+---
+
 ## Team
 
 - **Nicholas:** firmware, AI and system integration
 - **Finn:** firmware support, display integration and R.O.G.E.R.'s face animations
 - **Guyton:** power, custom PCB and enclosure
+
+## License
+
+[MIT](LICENSE). The bundled libdeflate keeps its own license (`pi/third_party/libdeflate/COPYING`).

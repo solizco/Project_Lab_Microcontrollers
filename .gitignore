@@ -1,3 +1,18 @@
+# Editors
 .vscode/settings.json
 .vscode/c_cpp_properties.json
 .vscode/launch.json
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Build output (pi/: make, tools/build_pi.sh; ESP32: PlatformIO)
+pi/build/
+pi/out/
+.pio/
+pi/brain
+pi/bench
