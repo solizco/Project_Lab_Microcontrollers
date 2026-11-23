@@ -1,15 +1,82 @@
-Connect Four Game Brain - prebuilt for Raspberry Pi 5 (64-bit Raspberry Pi OS)
-==============================================================================
-This is the Pi 5 build (64-bit). The Pi Zero needs the other build (c4_pi_zero.zip);
+Connect Four Game Brain - prebuilt for Raspberry Pi 4 and Raspberry Pi 5 (64-bit Raspberry Pi OS)
+=================================================================================================
+This is the 64-bit build (Pi 4 and Pi 5). The Pi Zero needs the other build (c4_pi_zero.zip);
 install_autostart.sh tells you if the wrong one is on the card.
 
-PI 5 DIFFERENCES
-  - Serial port to the ESP32 (pins 8 and 10) is /dev/ttyAMA0, not /dev/serial0.
-    install_autostart.sh picks it by itself and turns it on (dtparam=uart0=on).
-    Running by hand:  ./brain --serial /dev/ttyAMA0
-  - Screen: micro-HDMI port HDMI0 (the one next to the USB-C power port).
-  - Upside-down screen:  bash /boot/firmware/roger/c4/install_autostart.sh --serial --rotate 180
+PI 4, NO ESP32 (the normal setup now)
+  The Pi drives everything itself: stepper driver, limit switch, servo, the three
+  buttons and the shutdown button, straight from its GPIO pins.
 
+  1. Install:   bash /boot/firmware/roger/c4/install_autostart.sh --gpio --rotate 180
+                (it creates roger/pins.conf on the SD card, blank)
+  2. Pins:      open roger/pins.conf on the SD card (from Windows is fine) and fill in
+                the BCM GPIO number of each wire (GPIO17 -> 17, not the physical pin).
+                Run the install script again if you set or change SERVO (it sets up
+                the servo's hardware PWM), then reboot.
+  3. Check:     ~/roger/c4/brain --check-pins
+                shows the pins it read, any mistakes, whether the GPIO opened, the
+                servo mode, and what the limit switch and buttons read right now.
+  4. Servo:     game menu > Options > Servo calibration. Left/right move, select edits
+                a value (the servo moves live), Test red/black drop, Save. The bottom
+                line shows the live servo output (pulse width, on/off, verified).
+     "Check signal" on that screen measures what really comes out of the servo pin.
+  5. Servo test without the game (quit it with Q first):
+                ~/roger/c4/brain --servo-test           (add --soft to try software PWM)
+                moves only the servo: rest, red, rest, black, rest, and prints what
+                the Pi's PWM is really outputting at each step. Every line "verified"
+                but no movement = servo power or ground, not software.
+  Nothing set up yet? The game still starts, on the screen only, and says what is missing.
+
+  Wiring rules
+    - Limit switch, buttons, shutdown button: GPIO to GND when pressed (pull-ups are on).
+    - TMC2209: STEP, DIR, EN to their GPIOs, VIO to the Pi's 3.3 V (pin 1 or 17),
+      GND to a Pi GND, motor power (VM) from the motor buck, never near the Pi.
+    - Servo signal on GPIO 12, 13, 18 or 19 = smooth hardware PWM. Servo power from
+      its own 5 V buck, servo ground joined to the Pi ground.
+    - EN on GPIO 0-8 keeps the motor off while the Pi boots (those start HIGH).
+    - Never put 5 V or the motor voltage on any GPIO. 3.3 V logic only.
+  Logs: ~/c4_log.txt (lines starting with "gantry:" are the motion code; every drop
+        logs its servo angles and the PWM state; "power:" lines report under-voltage).
+
+  Fail-safes built in
+    - The servo pin itself is measured at start-up (a built-in logic analyzer reads the
+      pin's real level): if hardware PWM isn't reaching the pin, it switches to
+      software PWM by itself and measures again. "the Pi IS sending the right signal"
+      in the log means any remaining problem is servo power, ground or the wire.
+    - Servo PWM is read back after every change. A channel found off is set up again;
+      if the hardware PWM keeps refusing, it switches to software PWM by itself.
+    - A failed re-home after a drop no longer ends the game: the piece is in, so the
+      game continues, and the gantry homes again (in the background, then before the
+      next move). Only a second failure stops the game.
+    - The drop timeout counts silence, not time: a slow drop that keeps reporting
+      progress is fine; a hung one still faults after 15 s.
+    - Under-voltage on the Pi's 5 V supply is detected and shown on screen.
+    - Limit switch: must read pressed for LIMIT_FILTER_MS (3 ms) with the motor
+      paused, AND homing touches it twice (back off 3 mm, touch again slowly), so
+      motor noise on the wire can't fake a home. False touches are counted in the log.
+    - Lost steps: every re-home checks the distance travelled against where the
+      gantry should have been, and logs a warning if the belt slipped or steps were
+      missed (the re-home itself already corrects the position).
+    - Buttons: a press must hold for BUTTON_STABLE_MS (25 ms), so noise blips on the
+      button wires can't press anything. A button stuck down at start-up is reported
+      and ignored until it is released.
+    - Motor rest: after IDLE_MOTOR_OFF_S (300 s) without moving, the driver turns off
+      (cooler, longer battery). The gantry homes again before its next move.
+    - pins.conf mistakes are shown on the screen at start-up, not only in the log.
+    - SELECT = press LEFT and RIGHT together (CHORD_SELECT = 1, the default). An
+      arrow press waits up to CHORD_WINDOW_MS (150 ms) to see if the other arrow
+      follows; a quick tap is sent as soon as it is released. After a select, both
+      arrows are ignored until both are let go. BTN_SELECT can stay blank; if it is
+      wired it still works too.
+  Optional pins.conf settings: SERVO_HOLD (0 = limp between drops), SERVO_BOOT_TEST
+  (1 = wiggle at start), SERVO_FORCE_SOFTWARE, LIMIT_INVERT, LIMIT_FILTER_MS,
+  TWO_TOUCH_HOMING, BUTTON_STABLE_MS, IDLE_MOTOR_OFF_S (0 = motor always on),
+  CHORD_SELECT, CHORD_WINDOW_MS.
+
+OLD SETUP (ESP32 Motion Controller over the UART) still works: install with --serial.
+  Pi 4: /dev/serial0 (Bluetooth is turned off so pins 8/10 get the full UART)
+  Pi 5: /dev/ttyAMA0 (turned on with dtparam=uart0=on)
+Screen: micro-HDMI port HDMI0 (next to the USB-C power port). Power: 5 V at 3 A or more.
 
 1. FACES (Finn's GIFs)
    On the laptop, in the roger folder, double-click convert.bat. It fills
@@ -23,7 +90,7 @@ PI 5 DIFFERENCES
    cd ~/c4
    chmod +x brain bench test_ai test_brain
    ./brain --sim          full game on the screen with a fake gantry
-   ./brain --serial /dev/ttyAMA0     with the real ESP32 (Pi 5)
+   ./brain --serial /dev/serial0     with the real ESP32 (Pi 4; Pi 5: /dev/ttyAMA0)
 
    Keyboard: arrows or a/d move, Enter select, Esc back, B small board,
              Q quit. On Statistics: T test game, C twice = clear.
