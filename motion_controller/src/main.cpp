@@ -15,12 +15,24 @@
 //     frames, answers CMD_PING, restarts on CMD_RESET, and logs everything on
 //     the USB serial monitor (115200) with a status line every 5 s. Type ? in
 //     the serial monitor for test commands that work without the Pi.
+//   - status LED (GPIO2, the blue LED on most ESP32 boards): on from the very
+//     first line of setup(). Fast blink = waiting/homing, solid = homed,
+//     slow blink = homing failed (it keeps retrying by itself). If the LED is
+//     DARK after power-up, this program is not running at all: the ESP32
+//     itself did not start, which is a power/reset problem, not firmware.
+//   - servo calibration from the serial monitor (type "cal" for the commands):
+//     move the servo by angle or by pulse width, store rest / red / black
+//     positions, test a drop, and "save" them to flash. No re-upload needed.
+//     Typing anything in the serial monitor stops AUTOMATIC homing (boot homing
+//     and the retries every 3 s), so the console answers right away even when
+//     the gantry can't home. Type h to home, or auto to turn the retries back on.
 // It knows nothing about Connect Four rules or what is on screen.
 //
 // Retired commands (CMD_FACE / CMD_MENU / CMD_FAULT / CMD_MODE_SELECTED)
 // are ignored if they ever arrive.
 #include <Arduino.h>
 #include <ESP32Servo.h>
+#include <Preferences.h>   // servo calibration is saved in flash (NVS)
 #include <esp_system.h>
 #include <esp_attr.h>     // RTC_NOINIT_ATTR
 #include "protocol.h"
@@ -28,23 +40,30 @@
 // ---------- Pins (confirmed working on the validated rigs) ----------
 #define STEP_PIN         25
 #define DIR_PIN          26
-#define EN_PIN           27   // TMC2209 EN is active low
-#define LIMIT_SWITCH_PIN 33
-#define SERVO_PIN        32
+#define EN_PIN           33   // TMC2209 EN is active low
+#define LIMIT_SWITCH_PIN 32
+#define SERVO_PIN        27
 
 #define BTN_LEFT_PIN   21
 #define BTN_RIGHT_PIN  23
 #define BTN_SELECT_PIN 22
+// Status LED: GPIO2 is the onboard blue LED on most ESP32 dev boards.
+#define LED_PIN 2
+// Firmware build, shown on the serial monitor and on the Pi's Link debug screen.
+#define FW_BUILD 3
+
 // Shutdown button: hold 2 s and the Pi powers off cleanly (for swapping SD cards).
 // Wired from GPIO19 to GND, internal pull-up. GPIO19 was the old display's MOSI.
 #define BTN_SHUTDOWN_PIN 19
 #define SHUTDOWN_HOLD_MS 2000
 
-// UART to the Pi: Pi GPIO14 (TX) -> GPIO14 here (RX); Pi GPIO15 (RX) <- GPIO5 here (TX).
+// UART to the Pi: Pi pin 8 (GPIO14, TX) -> GPIO18 here (RX); Pi pin 10 (GPIO15, RX) <- GPIO5 here (TX).
 // GPIO2 fights the bootloader and GPIO34/35/36/39 are input-only, so TX is GPIO5.
 #define PI_UART_BAUD 115200
-#define PI_UART_RX   14
+#define PI_UART_RX   18
 #define PI_UART_TX   5
+#define C4_STR_(x) #x
+#define C4_STR(x) C4_STR_(x)
 
 // ---------- Motion constants (measured) ----------
 const float STEPS_PER_MM = 39.46;
@@ -60,11 +79,18 @@ const unsigned int HOMING_STEP_DELAY_US = 800;
 // retried quickly.
 #define MAX_HOMING_STEPS 11000
 
-// color 0 (RED) -> "Color A" angle; color 1 (BLACK) -> "Color B"
-const int SERVO_REST = 90;
-const int SERVO_COLOR_A = 60;
-const int SERVO_COLOR_B = 120;
-const int SERVO_PUSH_OFFSET = 15;
+// ---------- Dispenser servo calibration ----------
+// A drop is: go to the color's SELECT angle, then its PUSH angle, then back to
+// REST, waiting `servoWaitMs` after each move. These are the defaults; the
+// values actually used come from flash once you "save" a calibration.
+// color 0 = RED, color 1 = BLACK.
+#define SERVO_MIN_US 500      // pulse width for 0 deg
+#define SERVO_MAX_US 2500     // pulse width for 180 deg
+struct ServoCal { int rest, redSel, redPush, blackSel, blackPush, waitMs; };
+const ServoCal SERVO_DEFAULTS = { 103, 70, 100, 135, 110, 250 };
+ServoCal cal = SERVO_DEFAULTS;
+int servoNow = -1;            // last angle commanded (-1: off / raw pulse)
+Preferences prefs;
 
 Servo dispenserServo;
 FrameParser parser;
@@ -151,7 +177,7 @@ bool limitPressedFiltered() {
 }
 void send_status() {
     uint8_t bad = parser.bad_frames > 255 ? 255 : (uint8_t)parser.bad_frames;
-    send_debug(DBG_STATUS, (homed ? 1 : 0) | (limitPressed() ? 2 : 0), C4_FW_VERSION, bad);
+    send_debug(DBG_STATUS, (homed ? 1 : 0) | (limitPressed() ? 2 : 0), FW_BUILD, bad);
 }
 void send_ready()           { send_frame(CMD_READY, nullptr, 0); }
 void send_done(uint8_t col) { uint8_t p[1] = { col };  send_frame(CMD_DONE, p, 1); }
@@ -164,7 +190,22 @@ void send_button(uint8_t b) { uint8_t p[1] = { b };    send_frame(CMD_BUTTON, p,
 // loop(), so during a long (or failing) home every press was lost and the
 // Pi's menus looked frozen. Now every step loop calls this every ~2 ms.
 unsigned long shutdownDownSince = 0, lastShutdownSent = 0, lastService = 0;
+// Automatic homing (at boot and the retries) blocks for ~9 s per attempt, and the
+// serial console is only read between attempts. So typing in the serial monitor
+// during automatic homing stops it, and pauses the retries until "auto" or "h".
+bool autoHoming = false;      // true only while boot homing / automatic retries run
+bool abortHoming = false;     // set when console input arrives during autoHoming
+bool consolePaused = false;   // automatic retries paused by the serial console
+enum LedMode { LED_BUSY, LED_OK, LED_FAIL };   // fast blink / solid / slow blink
+LedMode ledMode = LED_BUSY;
+void updateLed() {
+    unsigned long t = millis();
+    digitalWrite(LED_PIN, ledMode == LED_OK ? HIGH : ledMode == LED_BUSY ? ((t / 100) % 2 ? HIGH : LOW)
+                                                                       : ((t / 500) % 2 ? HIGH : LOW));
+}
 void serviceInputs() {
+    updateLed();
+    if (autoHoming && !abortHoming && Serial.available()) abortHoming = true;
     if (debouncedPress(BTN_LEFT_PIN, lastLeft))     send_button(0);
     if (debouncedPress(BTN_RIGHT_PIN, lastRight))   send_button(1);
     if (debouncedPress(BTN_SELECT_PIN, lastSelect)) send_button(2);
@@ -217,12 +258,21 @@ void stepOnce(unsigned int delayUs) {
 
 bool homeFailed(long stepsTaken) {
     homed = false;
+    ledMode = LED_FAIL;
     send_debug(DBG_HOME, 0, (uint8_t)(stepsTaken >> 8), (uint8_t)stepsTaken);
     return false;
 }
 
+bool homeStopped(long stepsTaken) {
+    consolePaused = true;
+    Serial.printf("[%7lu] Homing stopped: you typed in the serial monitor. Automatic homing is paused "
+                  "(type h to home, auto to resume the retries).\n", millis());
+    return homeFailed(stepsTaken);
+}
+
 bool homeSlider() {
     unsigned long t0 = millis();
+    ledMode = LED_BUSY;
     bool startPressed = limitPressedFiltered();
     Serial.printf("[%7lu] Homing (limit switch %s)...\n", t0,
                   startPressed ? "reads PRESSED, backing off to check it" : "open");
@@ -237,6 +287,7 @@ bool homeSlider() {
         digitalWrite(DIR_PIN, 1);
         while (limitPressedFiltered()) {
             stepOnce(HOMING_STEP_DELAY_US);
+            if (autoHoming && abortHoming) return homeStopped(backed);
             if (++backed >= maxBack) {
                 Serial.printf("[%7lu] HOMING FAILED: limit switch (GPIO%d) still reads PRESSED after backing off %.0f mm. "
                               "The switch is stuck, miswired, or GPIO%d is being pulled low. Check its wiring and ground.\n",
@@ -253,6 +304,7 @@ bool homeSlider() {
     long stepsTaken = 0;
     while (!limitPressedFiltered()) {
         stepOnce(HOMING_STEP_DELAY_US);
+        if (autoHoming && abortHoming) return homeStopped(stepsTaken);
         if (++stepsTaken >= MAX_HOMING_STEPS) {
             Serial.printf("[%7lu] HOMING FAILED: %ld steps without hitting the limit switch (GPIO%d). "
                           "Check the switch wiring and that the motor actually turned.\n", millis(), stepsTaken, LIMIT_SWITCH_PIN);
@@ -261,6 +313,7 @@ bool homeSlider() {
     }
     currentPosition = 0;
     homed = true;
+    ledMode = LED_OK;
     Serial.printf("[%7lu] Homed after %ld steps (%lu ms).\n", millis(), stepsTaken, millis() - t0);
     send_debug(DBG_HOME, 1, (uint8_t)(stepsTaken >> 8), (uint8_t)stepsTaken);
     return true;
@@ -293,6 +346,7 @@ bool homeWithRetry() {
             waitMs(400);
         }
         if (homeSlider()) return true;
+        if (autoHoming && abortHoming) return false;   // stopped from the console: no more attempts
     }
     return false;
 }
@@ -311,22 +365,32 @@ void moveToColumn(int col) {
     }
 }
 
+void servoTo(int angle) {
+    angle = constrain(angle, 0, 180);
+    if (!dispenserServo.attached()) dispenserServo.attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+    dispenserServo.write(angle);
+    servoNow = angle;
+}
+
 void dropPiece(uint8_t color) {
-    int selectAngle = (color == 0) ? SERVO_COLOR_A : SERVO_COLOR_B;
-    int pushAngle = selectAngle + ((color == 0) ? SERVO_PUSH_OFFSET : -SERVO_PUSH_OFFSET);
+    int selectAngle = (color == 0) ? cal.redSel : cal.blackSel;
+    int pushAngle   = (color == 0) ? cal.redPush : cal.blackPush;
+    if (!dispenserServo.attached()) dispenserServo.attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
     dispenserServo.write(selectAngle);
-    waitMs(250);
+    waitMs(cal.waitMs);
     dispenserServo.write(pushAngle);
-    waitMs(250);
-    dispenserServo.write(SERVO_REST);
-    waitMs(200);
+    waitMs(cal.waitMs);
+    dispenserServo.write(cal.rest);
+    waitMs(cal.waitMs);
+    servoNow = cal.rest;
     Serial.printf("[%7lu] Servo drop done (%s)\n", millis(), color == 0 ? "RED" : "BLACK");
     send_debug(DBG_SERVO, color);
 }
 
+extern bool bootHomePending, bootHomeOk;
 void handle_home_command() {
-    if (homeWithRetry()) send_ready();
-    else              send_error(ERR_STEPPER_STALL);
+    if (homeWithRetry()) { bootHomePending = false; bootHomeOk = true; send_ready(); }
+    else                 send_error(ERR_STEPPER_STALL);
 }
 
 void handle_drop_command(uint8_t col, uint8_t color) {
@@ -347,9 +411,9 @@ void handle_drop_command(uint8_t col, uint8_t color) {
 // ---------- USB serial console (test the gantry without the Pi) ----------
 void printStatus() {
     Serial.printf("[%7lu] STATUS fw v%d | homed=%d pos=%ld limit=%s | from Pi: %lu bytes, %lu good frames, %lu bad%s | to Pi: %lu frames | last reset: %s\n",
-                  millis(), C4_FW_VERSION, homed ? 1 : 0, currentPosition, limitPressed() ? "PRESSED" : "open",
+                  millis(), FW_BUILD, homed ? 1 : 0, currentPosition, limitPressed() ? "PRESSED" : "open",
                   rxBytes, rxFrames, (unsigned long)parser.bad_frames,
-                  rxBytes == 0 ? "  <-- NOTHING received from the Pi: check Pi pin 8 (TX) -> GPIO14 and ground" : "",
+                  rxBytes == 0 ? "  <-- NOTHING received from the Pi: check Pi pin 8 (TX) -> GPIO" C4_STR(PI_UART_RX) " and ground" : "",
                   txFrames, resetName(bootReason));
 }
 void printHelp() {
@@ -361,9 +425,107 @@ void printHelp() {
     Serial.println("  l        watch the limit switch for 5 s");
     Serial.println("  p        send a test READY to the Pi");
     Serial.println("  r        restart this board");
+    Serial.println("  cal      servo calibration commands");
+    Serial.println("  auto     resume automatic homing retries (typing anything pauses them)");
+}
+
+// ---------- Servo calibration (serial monitor) ----------
+void printCal() {
+    char now[16];
+    if (servoNow >= 0) snprintf(now, sizeof now, "%d deg", servoNow); else snprintf(now, sizeof now, "off/raw");
+    Serial.printf("Servo now: %s | rest=%d  red: select=%d push=%d  black: select=%d push=%d  wait=%d ms\n",
+                  now,
+                  cal.rest, cal.redSel, cal.redPush, cal.blackSel, cal.blackPush, cal.waitMs);
+}
+void printCalHelp() {
+    Serial.println("Servo calibration (type then Enter):");
+    Serial.println("  sv           show the current servo values");
+    Serial.println("  a90          move the servo to 90 deg and hold (0-180)");
+    Serial.println("  + / -        nudge 1 deg     ++ / --   nudge 5 deg");
+    Serial.println("  u1500        raw pulse in microseconds (500-2500), to find the end stops");
+    Serial.println("  off          stop the pulses (servo goes limp)");
+    Serial.println("  rest         store the CURRENT angle as REST (both silos blocked)");
+    Serial.println("  red          store the current angle as RED select");
+    Serial.println("  redpush      store the current angle as RED push");
+    Serial.println("  black        store the current angle as BLACK select");
+    Serial.println("  blackpush    store the current angle as BLACK push");
+    Serial.println("  wait300      time to wait after each servo move, ms (bigger servo = slower)");
+    Serial.println("  tr / tb      test a RED / BLACK drop right here (gantry does not move)");
+    Serial.println("  save         keep these values after power-off (flash)");
+    Serial.println("  defaults     go back to the built-in values (then save to keep)");
+}
+void loadCal() {
+    prefs.begin("servo", true);
+    cal.rest      = prefs.getInt("rest",      SERVO_DEFAULTS.rest);
+    cal.redSel    = prefs.getInt("redSel",    SERVO_DEFAULTS.redSel);
+    cal.redPush   = prefs.getInt("redPush",   SERVO_DEFAULTS.redPush);
+    cal.blackSel  = prefs.getInt("blackSel",  SERVO_DEFAULTS.blackSel);
+    cal.blackPush = prefs.getInt("blackPush", SERVO_DEFAULTS.blackPush);
+    cal.waitMs    = prefs.getInt("waitMs",    SERVO_DEFAULTS.waitMs);
+    prefs.end();
+}
+void saveCal() {
+    prefs.begin("servo", false);
+    prefs.putInt("rest", cal.rest);           prefs.putInt("redSel", cal.redSel);
+    prefs.putInt("redPush", cal.redPush);     prefs.putInt("blackSel", cal.blackSel);
+    prefs.putInt("blackPush", cal.blackPush); prefs.putInt("waitMs", cal.waitMs);
+    prefs.end();
+    Serial.println("Saved to flash. To also make them the built-in defaults, put this line in main.cpp:");
+    Serial.printf("  const ServoCal SERVO_DEFAULTS = { %d, %d, %d, %d, %d, %d };\n",
+                  cal.rest, cal.redSel, cal.redPush, cal.blackSel, cal.blackPush, cal.waitMs);
+}
+bool needAngle() {
+    if (servoNow >= 0) return true;
+    Serial.println("Move the servo with a<angle> first (e.g. a90), then store it.");
+    return false;
+}
+// Returns true if `c` was a calibration command.
+bool runCalCommand(const char* c) {
+    if (!strcmp(c, "cal"))   { printCalHelp(); printCal(); return true; }
+    if (!strcmp(c, "sv"))    { printCal(); return true; }
+    if (!strcmp(c, "off"))   { dispenserServo.detach(); servoNow = -1; Serial.println("Servo off (limp)."); return true; }
+    if (!strcmp(c, "+") || !strcmp(c, "-") || !strcmp(c, "++") || !strcmp(c, "--")) {
+        if (!needAngle()) return true;
+        int d = (c[0] == '+' ? 1 : -1) * (c[1] ? 5 : 1);
+        servoTo(servoNow + d); printCal(); return true;
+    }
+    if (c[0] == 'a' && isdigit((unsigned char)c[1])) { servoTo(atoi(c + 1)); printCal(); return true; }
+    if (c[0] == 'u' && isdigit((unsigned char)c[1])) {
+        int us = constrain(atoi(c + 1), SERVO_MIN_US, SERVO_MAX_US);
+        if (!dispenserServo.attached()) dispenserServo.attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+        dispenserServo.writeMicroseconds(us);
+        servoNow = -1;
+        Serial.printf("Pulse %d us (about %d deg)\n", us, (int)((long)(us - SERVO_MIN_US) * 180 / (SERVO_MAX_US - SERVO_MIN_US)));
+        return true;
+    }
+    if (!strncmp(c, "wait", 4) && isdigit((unsigned char)c[4])) { cal.waitMs = constrain(atoi(c + 4), 50, 3000); printCal(); return true; }
+    struct { const char* name; int* slot; } slots[] = {
+        { "rest", &cal.rest }, { "red", &cal.redSel }, { "redpush", &cal.redPush },
+        { "black", &cal.blackSel }, { "blackpush", &cal.blackPush } };
+    for (auto& sl : slots) if (!strcmp(c, sl.name)) {
+        if (needAngle()) { *sl.slot = servoNow; Serial.printf("%s = %d deg (not saved yet: type save)\n", sl.name, servoNow); printCal(); }
+        return true;
+    }
+    if (!strcmp(c, "tr") || !strcmp(c, "tb")) {
+        Serial.printf("Test %s drop at the current gantry position\n", c[1] == 'r' ? "RED" : "BLACK");
+        dropPiece(c[1] == 'r' ? 0 : 1); printCal(); return true;
+    }
+    if (!strcmp(c, "save"))     { saveCal(); return true; }
+    if (!strcmp(c, "defaults")) { cal = SERVO_DEFAULTS; servoTo(cal.rest); Serial.println("Built-in values restored (not saved yet)."); printCal(); return true; }
+    return false;
 }
 char consoleBuf[16]; int consoleLen = 0;
 void runConsole(const char* c) {
+    if (!homed && !consolePaused && strcmp(c, "auto") && strcmp(c, "h")) {
+        consolePaused = true;
+        Serial.println("(Automatic homing paused while you use the serial console. Type auto to resume.)");
+    }
+    if (!strcmp(c, "auto")) {
+        consolePaused = false; abortHoming = false;
+        Serial.println("Automatic homing retries resumed.");
+        return;
+    }
+    if (runCalCommand(c)) return;
     int n = (c[1] >= '0' && c[1] <= '9') ? c[1] - '0' : -1;
     switch (c[0]) {
         case '?': printHelp(); break;
@@ -381,7 +543,8 @@ void runConsole(const char* c) {
             break;
         }
         case 'p': send_ready(); break;
-        case 'r': Serial.println("Restarting..."); delay(50); ESP.restart(); break;
+        case 'r': if (c[1]) { Serial.println("Unknown command, type ? for help"); break; }
+                  Serial.println("Restarting..."); delay(50); ESP.restart(); break;
         default: Serial.println("Unknown command, type ? for help"); break;
     }
 }
@@ -394,15 +557,24 @@ void pollConsole() {
     }
 }
 
+// After a failed boot homing the board keeps trying by itself (see loop()).
+bool bootHomePending = false;
+unsigned long lastAutoHome = 0;
+int autoHomeTries = 0;
+#define AUTO_HOME_EVERY_MS 3000
+#define AUTO_HOME_MAX_TRIES 60
+
 void setup() {
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, HIGH);              // first thing: LED on = this program is running
     Serial.begin(115200);
     Serial2.begin(PI_UART_BAUD, SERIAL_8N1, PI_UART_RX, PI_UART_TX);
     bootReason = (uint8_t)esp_reset_reason();
-    Serial.printf("\n=== Motion Controller fw v%d === reset reason: %s\n", C4_FW_VERSION, resetName(bootReason));
+    Serial.printf("\n=== Motion Controller fw v%d === reset reason: %s\n", FW_BUILD, resetName(bootReason));
     Serial.printf("Column 0 at %.1f mm, spacing %.1f mm, %.2f steps/mm\n", FIRST_COLUMN_OFFSET_MM, COLUMN_SPACING_MM, STEPS_PER_MM);
     Serial.printf("UART to Pi: RX GPIO%d (from Pi pin 8), TX GPIO%d (to Pi pin 10), %d baud. Type ? for test commands.\n",
                   PI_UART_RX, PI_UART_TX, PI_UART_BAUD);
-    send_debug(DBG_BOOT, bootReason, C4_FW_VERSION);
+    send_debug(DBG_BOOT, bootReason, FW_BUILD);
 
     pinMode(STEP_PIN, OUTPUT);
     pinMode(DIR_PIN, OUTPUT);
@@ -420,8 +592,10 @@ void setup() {
     for (int i = 0; i < NUM_COLUMNS; i++)
         columnSteps[i] = (long)((FIRST_COLUMN_OFFSET_MM + i * COLUMN_SPACING_MM) * STEPS_PER_MM + 0.5f);
 
-    dispenserServo.attach(SERVO_PIN, 500, 2500);
-    dispenserServo.write(SERVO_REST);
+    loadCal();
+    Serial.printf("Servo: rest=%d red=%d/%d black=%d/%d wait=%d ms (type cal to calibrate)\n",
+                  cal.rest, cal.redSel, cal.redPush, cal.blackSel, cal.blackPush, cal.waitMs);
+    servoTo(cal.rest);
 
     // On battery everything powers up at once (Pi, screen, servo, driver).
     // Let the supplies settle, then re-arm the driver before the first move.
@@ -429,8 +603,10 @@ void setup() {
     waitMs(1500);
     armDriver();
 
+    abortHoming = false; autoHoming = true;
     bootHomeOk = homeWithRetry();
-    if (!bootHomeOk && bootRestarts < MAX_BOOT_RESTARTS) {
+    autoHoming = false;
+    if (!bootHomeOk && bootRestarts < MAX_BOOT_RESTARTS && !consolePaused) {
         // Pressing EN fixed this on a cold start; do the same thing ourselves.
         bootRestarts++;
         Serial.printf("[%7lu] Boot homing failed: restarting this board (%u of %d), same as pressing EN\n",
@@ -441,8 +617,11 @@ void setup() {
         return;                               // (only reached in the host tests)
     }
     if (bootHomeOk) bootRestarts = 0;
+    bootHomePending = !bootHomeOk;            // loop() keeps retrying every few seconds
+    lastAutoHome = millis();
     Serial.println(bootHomeOk ? "Boot homing OK. Beaconing CMD_READY until the Pi answers."
-                              : "Boot homing FAILED. Beaconing CMD_ERROR until the Pi answers.");
+                   : consolePaused ? "Boot homing stopped from the serial console. Beaconing CMD_ERROR; type ? or cal."
+                                   : "Boot homing FAILED. Beaconing CMD_ERROR and retrying every 3 s.");
     if (bootHomeOk) send_ready(); else send_error(ERR_STEPPER_STALL);
     lastBeacon = millis();
 }
@@ -485,6 +664,23 @@ void loop() {
 
     // ---- buttons and the shutdown button: forwarded to the Pi in every state ----
     serviceInputs();
+
+    // ---- boot homing failed: keep trying by itself, so nobody has to press EN ----
+    if (bootHomePending && !homed && !consolePaused && autoHomeTries < AUTO_HOME_MAX_TRIES && millis() - lastAutoHome >= AUTO_HOME_EVERY_MS) {
+        autoHomeTries++;
+        Serial.printf("[%7lu] Automatic homing retry %d of %d\n", millis(), autoHomeTries, AUTO_HOME_MAX_TRIES);
+        armDriver();
+        abortHoming = false; autoHoming = true;
+        bool ok = homeSlider();
+        autoHoming = false;
+        if (ok) {
+            bootHomePending = false; bootHomeOk = true;
+            Serial.println("Homing recovered. Sending CMD_READY.");
+            send_ready();                     // the Pi goes back to its menu on this, even from the fault screen
+        }
+        lastAutoHome = millis();
+    }
+    if (homed) bootHomePending = false;
 
     // ---- beacon until the Pi has spoken ----
     if (!heardPi && millis() - lastBeacon > BEACON_INTERVAL_MS) {

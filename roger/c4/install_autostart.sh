@@ -4,9 +4,13 @@
 # =====================================================================
 # Run ON THE PI, as your normal user (not with sudo):
 #     bash /boot/firmware/roger/c4/install_autostart.sh
-#     add --sim    to start in sim mode (no ESP32, fake gantry)
-#     add --serial to switch back to the real ESP32
-#     (with neither, it keeps whatever start.sh already uses; first time = real ESP32)
+#     add --sim         to start in sim mode (no ESP32, fake gantry)
+#     add --serial      to switch back to the real ESP32
+#     add --rotate 180  for a screen mounted upside down (can be combined with the others)
+#     (with neither --sim nor --serial, it keeps whatever start.sh already uses;
+#      first time = real ESP32)
+# Works on the Pi Zero (32-bit build) and the Pi 5 (64-bit build): it finds the
+# right serial port by itself (Pi Zero: /dev/serial0, Pi 5: /dev/ttyAMA0 on pins 8/10).
 # Undo:
 #     bash ~/roger/c4/install_autostart.sh --remove
 #
@@ -57,19 +61,44 @@ remove_block() {
     fi
 }
 
+# Which Pi is this? The Pi 5 puts the pins 8/10 UART on /dev/ttyAMA0 (its
+# /dev/serial0 is the separate 3-pin debug connector), and it needs uart0 on.
+MODEL="${C4_TEST_MODEL:-$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)}"
+case "$MODEL" in
+    *"Raspberry Pi 5"*) PI5=1; SERIAL_DEV=/dev/ttyAMA0 ;;
+    *)                  PI5=0; SERIAL_DEV=/dev/serial0 ;;
+esac
+
+# Options for this run
+MODE=""; ROTATE=0; REMOVE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sim)    MODE=sim ;;
+        --serial) MODE=serial ;;
+        --rotate) shift; [ "${1:-}" = "180" ] && ROTATE=1 ;;
+        --rotate180|--flip) ROTATE=1 ;;
+        --remove) REMOVE=1 ;;
+    esac
+    shift
+done
+
 # How the game starts. Keep what start.sh already says (read it BEFORE step 1
 # replaces the folder), unless --sim or --serial was given on this run.
 if [ -f "$DEST/c4/start.sh" ] && grep -q "^BRAIN_ARGS=" "$DEST/c4/start.sh"; then
     KEEP_ARGS="$(grep "^BRAIN_ARGS=" "$DEST/c4/start.sh" | head -1)"
 else
-    KEEP_ARGS='BRAIN_ARGS="--serial /dev/serial0"'
+    KEEP_ARGS="BRAIN_ARGS=\"--serial $SERIAL_DEV\""
 fi
-case "${1:-}" in
-    --sim)    KEEP_ARGS='BRAIN_ARGS="--sim"' ;;
-    --serial) KEEP_ARGS='BRAIN_ARGS="--serial /dev/serial0"' ;;
-esac
+[ "$MODE" = sim ]    && KEEP_ARGS='BRAIN_ARGS="--sim"'
+[ "$MODE" = serial ] && KEEP_ARGS="BRAIN_ARGS=\"--serial $SERIAL_DEV\""
+if [ "$PI5" = 1 ]; then                                  # moved from a Pi Zero: fix the port
+    KEEP_ARGS="$(echo "$KEEP_ARGS" | sed 's|/dev/serial0|/dev/ttyAMA0|')"
+fi
+if [ "$ROTATE" = 1 ] && ! echo "$KEEP_ARGS" | grep -q -- "--rotate 180"; then
+    KEEP_ARGS="$(echo "$KEEP_ARGS" | sed 's|"$| --rotate 180"|')"
+fi
 
-if [ "${1:-}" = "--remove" ]; then
+if [ "$REMOVE" = 1 ]; then
     say "Removing the game autostart"
     remove_block
     if [ -f /etc/sudoers.d/020-connect4-poweroff ]; then
@@ -100,7 +129,13 @@ case "$SRC_ROGER" in
         ;;
 esac
 C4="$DEST/c4"
-chmod +x "$C4"/brain "$C4"/bench "$C4"/test_ai "$C4"/test_brain 2>/dev/null
+chmod +x "$C4"/brain "$C4"/bench "$C4"/test_ai "$C4"/test_brain "$C4"/test_ui 2>/dev/null
+if "$C4/brain" --version >/dev/null 2>&1; then
+    echo "   $("$C4/brain" --version) runs on this Pi (${MODEL:-unknown model}, $(uname -m))"
+else
+    warn "the game program does not run on this Pi (${MODEL:-unknown model}, $(uname -m))."
+    warn "Use the c4 folder built for it: Pi 5 = the 64-bit build (c4_pi5.zip), Pi Zero = c4_pi_zero.zip."
+fi
 if [ -d "$DEST/faces" ] && ls "$DEST"/faces/*.face >/dev/null 2>&1; then
     echo "   faces: $(ls "$DEST"/faces/*.face | wc -l) face files found"
 else
@@ -113,9 +148,9 @@ cat > "$C4/start.sh" <<EOF
 #!/bin/bash
 # Started automatically at boot on the screen (tty1). Edit BRAIN_ARGS to change
 # how the game starts, for example:
-#   BRAIN_ARGS="--serial /dev/serial0"           real ESP32 (normal)
+#   BRAIN_ARGS="--serial $SERIAL_DEV"           real ESP32 (normal)
 #   BRAIN_ARGS="--sim"                           no ESP32, fake gantry
-#   BRAIN_ARGS="--serial /dev/serial0 --rotate 180"   screen mounted upside down
+#   BRAIN_ARGS="--serial $SERIAL_DEV --rotate 180"   screen mounted upside down
 $KEEP_ARGS
 
 cd "\$(dirname "\$0")"
@@ -155,6 +190,18 @@ if command -v raspi-config >/dev/null 2>&1; then
     sudo raspi-config nonint do_serial_hw 0 && echo "   serial port hardware: on" || warn "could not enable the serial port (raspi-config > Interface Options > Serial Port)"
 else
     warn "raspi-config not found; set auto-login and the serial port by hand"
+fi
+if [ "$PI5" = 1 ]; then
+    for CFG in /boot/firmware/config.txt /boot/config.txt; do
+        [ -f "$CFG" ] || continue
+        if grep -q "^dtparam=uart0=on" "$CFG"; then
+            echo "   Pi 5 UART on pins 8/10 (/dev/ttyAMA0): already on"
+        else
+            sudo cp "$CFG" "$CFG.bak-connect4-uart" && echo "dtparam=uart0=on" | sudo tee -a "$CFG" >/dev/null \
+                && echo "   Pi 5 UART on pins 8/10 (/dev/ttyAMA0): on (backup at $CFG.bak-connect4-uart)"
+        fi
+        break
+    done
 fi
 for CMD in /boot/firmware/cmdline.txt /boot/cmdline.txt; do
     if [ -f "$CMD" ]; then

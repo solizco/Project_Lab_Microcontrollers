@@ -1,4 +1,15 @@
-Connect Four Game Brain - prebuilt for Raspberry Pi Zero (ARMv6, 32-bit OS)
+Connect Four Game Brain - prebuilt for Raspberry Pi 5 (64-bit Raspberry Pi OS)
+==============================================================================
+This is the Pi 5 build (64-bit). The Pi Zero needs the other build (c4_pi_zero.zip);
+install_autostart.sh tells you if the wrong one is on the card.
+
+PI 5 DIFFERENCES
+  - Serial port to the ESP32 (pins 8 and 10) is /dev/ttyAMA0, not /dev/serial0.
+    install_autostart.sh picks it by itself and turns it on (dtparam=uart0=on).
+    Running by hand:  ./brain --serial /dev/ttyAMA0
+  - Screen: micro-HDMI port HDMI0 (the one next to the USB-C power port).
+  - Upside-down screen:  bash /boot/firmware/roger/c4/install_autostart.sh --serial --rotate 180
+
 
 1. FACES (Finn's GIFs)
    On the laptop, in the roger folder, double-click convert.bat. It fills
@@ -12,7 +23,7 @@ Connect Four Game Brain - prebuilt for Raspberry Pi Zero (ARMv6, 32-bit OS)
    cd ~/c4
    chmod +x brain bench test_ai test_brain
    ./brain --sim          full game on the screen with a fake gantry
-   ./brain --serial /dev/serial0     with the real ESP32
+   ./brain --serial /dev/ttyAMA0     with the real ESP32 (Pi 5)
 
    Keyboard: arrows or a/d move, Enter select, Esc back, B small board,
              Q quit. On Statistics: T test game, C twice = clear.
@@ -50,9 +61,12 @@ If the screen stays on the text console, read ~/c4_log.txt or run
      Keyboard                    the keyboard plugged into the Pi
    Games then play entirely on the display (full board, falling pieces) and
    the gantry stays parked. During a game only the chosen controls move
-   pieces; menus always work with both. Remembered after a reboot. Turn it
-   off from the same screen ("Turn off screen only"). Works with no ESP32
-   plugged in (choose Keyboard), and from a gantry fault.
+   pieces; menus always work with both. Turn it off from the same screen
+   ("Turn off screen only"). Works with no ESP32 plugged in (choose
+   Keyboard), and from a gantry fault.
+   NOT remembered after power-off: every start is normal gantry mode with
+   the Motion Controller buttons, so the Pi can't come up stuck in keyboard
+   mode with no keyboard attached.
    With Screen only OFF (normal play), the buttons and keyboard both work.
 
 5b. COIN TOSS
@@ -131,3 +145,23 @@ If the screen stays on the text console, read ~/c4_log.txt or run
    - A failed home is noticed in about 9 s instead of 16 s.
    - If boot homing fails, the board restarts itself (like pressing EN), at
      most twice per power-up.
+
+11. IF THE GANTRY ONLY HOMES AFTER PRESSING EN ON THE ESP32
+   Watch two things after a cold power-up on battery (USB unplugged):
+     - the ESP32's blue LED (firmware build 3): dark = the ESP32 is not
+       running at all. Fast blink = homing, solid = homed, slow blink =
+       homing failed and it is retrying by itself.
+     - the main menu: "NO SIGNAL from the Motion Controller" means the Pi
+       has not received one byte from it.
+   LED dark + NO SIGNAL = the ESP32 did not start. No program can fix that,
+   because no program is running. Hardware fix, on the breadboard:
+     a) 10 uF capacitor from the ESP32's EN pin to GND (minus leg to GND).
+        This holds it in reset until the power has settled.
+     b) Optional, lets the Pi press EN by itself: a 1 k resistor from the
+        wire that goes Pi pin 8 -> ESP32 GPIO14 over to the EN pin (keep
+        the capacitor from a). When the Pi hears nothing for 6 s it holds
+        that wire low for 0.3 s, which resets the ESP32. The game already
+        does this; without the resistor it has no effect.
+   LED blinking but the gantry does not move = the ESP32 runs and the motor
+   driver is the problem; the board retries every 3 s and the Pi goes back
+   to the menu by itself when homing succeeds.
