@@ -4,15 +4,17 @@
 #   make test       # runs all tests
 #   ./bench         # FIRST THING TO RUN on the Pi: measures search speed
 #   ./brain --sim   # play at the keyboard with a fake Motion Controller
-#   ./brain --serial /dev/serial0
+#   ./brain               # Pi 4: gantry on the Pi's GPIO (pins.conf)
+#   ./brain --serial /dev/serial0   # old ESP32 setup
 CXX      ?= g++
-CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pthread -Ithird_party/libdeflate
+C4_BUILD ?= $(shell date +%Y-%m-%d_%H:%M)
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pthread -Ithird_party/libdeflate -DC4_BUILD='"$(C4_BUILD)"'
 CFLAGS   ?= -O2 -Ithird_party/libdeflate
 LDFLAGS  ?= -pthread
 
-SRC_LIB  := src/ai.cpp src/game.cpp src/settings.cpp src/link.cpp src/brain.cpp
+SRC_LIB  := src/ai.cpp src/game.cpp src/settings.cpp src/link.cpp src/brain.cpp src/pins.cpp src/motion.cpp
 OBJ_LIB  := $(SRC_LIB:src/%.cpp=build/%.o)
-SRC_UI   := src/gfx.cpp src/faces.cpp src/stats.cpp src/app.cpp
+SRC_UI   := src/gfx.cpp src/faces.cpp src/stats.cpp src/app.cpp src/pi_hal.cpp
 OBJ_UI   := $(SRC_UI:src/%.cpp=build/%.o)
 DEFLATE  := third_party/libdeflate/lib/deflate_decompress.c third_party/libdeflate/lib/zlib_decompress.c \
             third_party/libdeflate/lib/adler32.c third_party/libdeflate/lib/utils.c \
@@ -42,11 +44,17 @@ build/test_link: tests/test_link.cpp build/link.o
 build/test_brain: tests/test_brain.cpp $(OBJ_LIB)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+build/test_motion: tests/test_motion.cpp $(OBJ_LIB)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+build/test_pwm: tests/test_pwm.cpp build/pi_hal.o $(OBJ_LIB)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 build/test_ui: tests/test_ui.cpp $(OBJ_LIB) $(OBJ_UI) $(OBJ_DEF)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
-test: build/test_ai build/test_link build/test_brain build/test_ui
-	build/test_ai && build/test_link && build/test_brain && build/test_ui
+test: build/test_ai build/test_link build/test_brain build/test_motion build/test_pwm build/test_ui
+	build/test_ai && build/test_link && build/test_brain && build/test_motion && build/test_pwm && build/test_ui
 
 clean:
 	rm -rf build brain bench

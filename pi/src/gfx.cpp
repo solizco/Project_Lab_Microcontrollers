@@ -81,6 +81,19 @@ void Canvas::circle(int cx, int cy, int r, uint16_t c) {
         }
 }
 
+void Canvas::ellipse(int cx, int cy, int rx, int ry, uint16_t c) {
+    if (rx < 1) rx = 1;
+    if (ry < 1) return;
+    for (int dy = -ry; dy <= ry; dy++) {
+        double fy = (double)dy / ry;
+        double half = rx * std::sqrt(std::max(0.0, 1.0 - fy * fy));
+        int full = (int)half;
+        for (int dx = -full; dx <= full; dx++) blend(cx + dx, cy + dy, c, 255);
+        int a = (int)((half - full) * 255);             // anti-aliased left/right edge
+        if (a > 0) { blend(cx - full - 1, cy + dy, c, a); blend(cx + full + 1, cy + dy, c, a); }
+    }
+}
+
 int Canvas::fontHeight(FontId f) { return FONTS[f].height; }
 
 int Canvas::textWidth(const std::string& s, FontId f) {

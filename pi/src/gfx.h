@@ -31,6 +31,7 @@ public:
     void roundRect(int x, int y, int rw, int rh, int r, uint16_t c);
     void roundRectOutline(int x, int y, int rw, int rh, int r, int t, uint16_t c);
     void circle(int cx, int cy, int r, uint16_t c);
+    void ellipse(int cx, int cy, int rx, int ry, uint16_t c);   // filled, soft left/right edges
     void hline(int x0, int x1, int y, uint16_t c);
     // Text: y is the TOP of the text box (same as pygame blit).
     int  text(const std::string& s, FontId f, uint16_t c, int x, int y);

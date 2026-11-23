@@ -69,7 +69,7 @@ The final R.O.G.E.R. runs everything on a single Raspberry Pi 4:
 - the game, the AI and the face display
 - the stepper gantry, the drop servo, the limit switch and the buttons, all wired to the Pi's own GPIO
 
-There is no ESP32 and no UART link. The same game program runs in a new `--gpio` mode, with these changes:
+There is no ESP32 and no UART link. The same game program runs in a new `--gpio` mode. The ESP32 firmware's motion code was moved into the Pi program (`pi/src/motion.*`), where it runs on its own thread and still uses the same command frames, so the game state machine, screen-only mode and the link-debug screen didn't change. The Pi 4 build adds these changes:
 
 - **Pins live in a config file.** They are read from `roger/pins.conf` at start-up, so rewiring needs no rebuild. `brain --check-pins` shows what each pin reads right now.
 - **The servo runs on hardware PWM** (GPIO12) and is calibrated from an on-screen menu, which replaced the ESP32's serial console.
@@ -103,17 +103,17 @@ A failed re-home after a drop no longer ends the game. Removing the second board
 | `MicroControllersTestSuitev2_fixed.ipynb` | all | Python prototype of the bot: game class, minimax search, heuristic tuning, benchmarks and a human-vs-AI playtest. The C++ search in every design is based on it. |
 | `game_brain (unused now)/` | 1 | PlatformIO project for the ESP32 Game Brain: bitboard board (`board.h`), minimax (`minimax.h`), difficulty presets, ST7789 display and the UART protocol. Retired when the Pi Zero took over. |
 | `random_esp32_testing/` | 1 | ESP32 experiment playing face clips from LittleFS flash (packed MJPEG clips; per-file opens cost about 60 ms each). |
-| `pi/src/`, `pi/tests/` | 2 | C++ Game Brain for the Pi Zero: AI (`ai.*`), rules and difficulty (`game.*`), state machine (`brain.*`), UART link plus a simulated gantry (`link.*`), framebuffer graphics (`gfx.*`), faces (`faces.*`), stats and settings. Includes unit tests. |
-| `pi/Makefile`, `pi/tools/` | 2 | Build on the Pi (`make`), or cross-compile static ARMv6 binaries on a laptop (`tools/build_pi.sh`, uses Zig). `install_autostart.sh` starts the game at boot. |
-| `pi/motion_controller/` | 2 | The motion-only ESP32 firmware paired with the Pi Zero, with a `host_test/` harness that runs it on a PC. |
+| `pi/src/`, `pi/tests/` | 2 → **4** | C++ Game Brain, written for the Pi Zero and carried through to the final Pi 4: AI (`ai.*`), rules and difficulty (`game.*`), state machine (`brain.*`), UART link plus a simulated gantry (`link.*`), framebuffer graphics (`gfx.*`), faces (`faces.*`), stats and settings. The Pi 4 files are `motion.*` (the gantry, moved from the ESP32), `pi_hal.*` (GPIO and hardware PWM) and `pins.*` (reads `pins.conf`). Tests cover the AI, link, state machine, gantry, PWM and UI. See [`pi/README.md`](pi/README.md). |
+| `pi/Makefile`, `pi/tools/` | 2 → **4** | `make && make test` on a laptop. `tools/build_pi.sh pi64` cross-compiles the Pi 4/5 binaries (and with no argument, the Pi Zero ones) using Zig. `install_autostart.sh` starts the game at boot. |
+| `pi/motion_controller/` | 2–3 | A copy of the motion-only ESP32 firmware kept alongside the Pi source: breadboard wiring, different servo defaults (90 / 60 / 75 / 120 / 105 / 250), and a `host_test/` harness that runs it on a PC. |
 | `roger/gifs/`, `roger/faces/` | 2–4 | R.O.G.E.R.'s face animations: the source GIFs and the converted `.face` files the game plays. |
 | `roger/gifface.py`, `roger/convert_gifs.py`, `roger/convert.bat` | 2–4 | Face tooling: preview and adjust each GIF's framing and speed, then convert the GIFs to `.face` files on a laptop. |
 | `roger/connect4.py` | 2 | Early Python/pygame prototype of the menu and statistics screens, later rebuilt in C++. |
 | `roger/c4/` | **4** (also 3) | **The final build:** 64-bit binaries for the Pi 4 (and Pi 5), built Nov 21. Start it with `--gpio` (Pi 4 runs everything, the final setup) or `--serial` (with the ESP32 Motion Controller, Design 3). Includes the autostart installer, the `test_motion` and `test_pwm` hardware tests, and `README.txt`, the full setup and troubleshooting guide. The Pi-5-only build from Design 3 is in the git history (commit `3b10e3d`). |
 | `roger/pins.conf` | 4 | GPIO wiring for the Pi 4, plus gantry, servo, homing and button tuning. Read at start-up. |
-| `motion_controller/` | 1 → 3 | The ESP32 Motion Controller firmware in its final state (build 3): homing with automatic retry, drops, button and shutdown forwarding, link debugging and servo calibration. Not used in Design 4. |
+| `motion_controller/` | 1 → 3 | The ESP32 Motion Controller firmware in its final state (build 3), for the custom PCB wiring (`src/main.cpp`) and the breadboard wiring (`variants/breadboard_pins/`). Covers homing with automatic retry, drops, button and shutdown forwarding, link debugging and servo calibration. Retired in Design 4. See [`motion_controller/README.md`](motion_controller/README.md). |
 
-**Source gap:** the C++ source for the November builds in `roger/c4/`, including the Pi 4 GPIO motion code, is not committed. `pi/src/` is the Pi Zero version, last updated Oct 14.
+`pi/` builds cleanly with `make`. On a PC, the AI, link, state machine (163 checks), gantry (109 checks) and PWM tests all pass. Cross-compiling with `tools/build_pi.sh pi64` reproduces the `roger/c4/` binaries.
 
 ---
 

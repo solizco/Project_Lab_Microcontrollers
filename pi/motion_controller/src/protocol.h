@@ -173,6 +173,38 @@ enum C4Command : uint8_t {
                         // state on the display rather than silently
                         // continuing with a board state that may not
                         // match physical reality.
+
+    CMD_SHUTDOWN = 0x13, // The shutdown button on Motion Controller was held
+                        // for 2 s. The Pi powers off cleanly (any state,
+                        // even mid-game). No payload. Sent once per hold,
+                        // repeated every second while still held in case
+                        // a frame is lost; the Pi treats repeats as one.
+
+    // ---- Debugging (Motion Controller firmware v2 and later) ----
+    CMD_PING  = 0x14,  // Pi -> MC: "can you hear me?" No payload. MC answers
+                        // with CMD_DEBUG DBG_STATUS. Older firmware ignores it.
+    CMD_RESET = 0x15,  // Pi -> MC: restart the Motion Controller (as if EN was
+                        // pressed). It re-homes and beacons READY. No payload.
+    CMD_DEBUG = 0x16,  // MC -> Pi: what the firmware is doing, for the Pi's
+                        // log and Link debug screen. Never changes game state.
+                        // payload[0] = C4DebugEvent, payload[1..3] = details.
+};
+
+// ------------------------------------------------------------
+// Debug events (payload[0] of CMD_DEBUG)
+// ------------------------------------------------------------
+#define C4_FW_VERSION 2
+enum C4DebugEvent : uint8_t {
+    DBG_BOOT   = 0x01,  // just powered up / restarted. [1] = reset reason
+                        // (esp_reset_reason(): 1 power-on, 3 software,
+                        // 4 crash, 5-7 watchdog, 9 brownout), [2] = firmware version
+    DBG_RX     = 0x02,  // heard a valid frame from the Pi. [1] = cmd, [2..3] = payload[0..1]
+    DBG_MOVE   = 0x03,  // [1] = target column, [2] = 0 started / 1 arrived
+    DBG_HOME   = 0x04,  // homing finished. [1] = 1 ok / 0 failed, [2..3] = steps taken (big endian)
+    DBG_SERVO  = 0x05,  // servo drop finished. [1] = color
+    DBG_BAD    = 0x06,  // got a corrupted frame from the Pi. [1..2] = total bad frames (big endian)
+    DBG_STATUS = 0x07,  // reply to CMD_PING. [1] = bit0 homed, bit1 limit switch pressed,
+                        // [2] = firmware version, [3] = bad frames seen (capped at 255)
 };
 
 // ------------------------------------------------------------
@@ -259,6 +291,7 @@ public:
     uint8_t cmd = 0;
     uint8_t payload[C4_MAX_PAYLOAD] = {0};
     uint8_t payload_len = 0;
+    uint32_t bad_frames = 0;   // frames thrown away (bad length, checksum or end byte)
 
     // Feed one incoming byte. Returns true if this byte completed a
     // valid frame (cmd/payload/payload_len are ready to read).
@@ -278,6 +311,7 @@ public:
 
             case WAIT_LEN:
                 if (b > C4_MAX_PAYLOAD) {
+                    bad_frames++;
                     // Malformed length -- abandon this frame attempt
                     // and go back to looking for a fresh start byte,
                     // rather than trying to read a payload size that
@@ -303,6 +337,7 @@ public:
                 } else {
                     // Checksum mismatch -- corrupted frame, discard
                     // and resync rather than trusting bad data.
+                    bad_frames++;
                     state = WAIT_START;
                 }
                 break;
@@ -315,6 +350,7 @@ public:
                     return true;  // complete, valid frame -- caller
                                    // should read cmd/payload/payload_len now
                 }
+                bad_frames++;
                 break;
         }
         return false;

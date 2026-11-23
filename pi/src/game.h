@@ -13,7 +13,8 @@
 class Board {
 public:
     Board() { reset(); }
-    void reset()                    { c4_init(&s_); }
+    // first: 0 = RED moves first (R.O.G.E.R / Player One), 1 = BLACK (the human / Player Two)
+    void reset(int first = 0)       { c4_init(&s_); s_.to_move = first ? PLAYER_BLACK : PLAYER_RED; }
     bool legal(int col) const       { return col >= 0 && col < C4_WIDTH && c4_is_column_legal(&s_, (uint8_t)col); }
     void play(int col)              { c4_apply_move(&s_, (uint8_t)col); }   // caller checks legal() first
     bool won(int player) const      { return c4_is_win(s_.bitboard[player]); }

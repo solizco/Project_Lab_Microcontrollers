@@ -2,6 +2,7 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -27,11 +28,22 @@ bool SerialLink::open(const std::string& device) {
     return true;
 }
 
+void SerialLink::hardwareBreak() {
+    if (fd_ < 0) return;
+    if (ioctl(fd_, TIOCSBRK) == 0) { breakOn_ = true; breakEnd_ = now_ + 300; }   // ended in poll(), never blocks
+}
+
+void SerialLink::endBreak() {
+    if (breakOn_) { ioctl(fd_, TIOCCBRK); breakOn_ = false; }
+}
+
 void SerialLink::send(uint8_t cmd, const uint8_t* payload, uint8_t len) {
     if (fd_ < 0) return;
+    endBreak();                            // never send data into a break
     uint8_t frame[C4_MAX_PAYLOAD + 5];
     uint8_t n = build_frame(cmd, payload, len, frame);
     if (n == 0) return;
+    cnt.txFrames++;
     int off = 0, spins = 0;
     while (off < n && spins < 1000) {
         ssize_t w = ::write(fd_, frame + off, n - off);
@@ -41,16 +53,20 @@ void SerialLink::send(uint8_t cmd, const uint8_t* payload, uint8_t len) {
     }
 }
 
-bool SerialLink::poll(Frame& out, uint64_t) {
+bool SerialLink::poll(Frame& out, uint64_t now_ms) {
     if (fd_ < 0) return false;
+    now_ = now_ms;
+    if (breakOn_ && now_ >= breakEnd_) endBreak();
     for (;;) {
         if (pos_ >= len_) {
             ssize_t r = ::read(fd_, buf_, sizeof(buf_));
-            if (r <= 0) { pos_ = len_ = 0; return false; }
+            if (r <= 0) { pos_ = len_ = 0; cnt.badFrames = parser_.bad_frames; return false; }
             pos_ = 0; len_ = (int)r;
+            cnt.rxBytes += (uint32_t)r;
         }
         while (pos_ < len_) {
             if (parser_.feed_byte(buf_[pos_++])) {
+                cnt.rxFrames++;
                 out.cmd = parser_.cmd;
                 out.len = parser_.payload_len;
                 memcpy(out.payload, parser_.payload, sizeof(out.payload));
@@ -69,12 +85,38 @@ void SimLink::enqueue(uint64_t delay, uint8_t cmd, const uint8_t* p, uint8_t n) 
 
 void SimLink::pushButton(uint8_t btn) { enqueue(0, CMD_BUTTON, &btn, 1); }
 
+void SimLink::reboot(uint8_t reason) {
+    q_.clear();
+    heard_pi_ = false;
+    next_beacon_ = now_ + home_ms;         // boot homing, then the beacon starts again
+    if (debug_frames) { uint8_t d[4] = { DBG_BOOT, reason, C4_FW_VERSION, 0 }; enqueue(0, CMD_DEBUG, d, 4); }
+}
+
+void SimLink::hardwareBreak() {
+    breaks_received++;
+    if (break_wired && not_started) { not_started = false; reboot(1); }   // EN pulled low: the board starts
+}
+
 void SimLink::send(uint8_t cmd, const uint8_t* p, uint8_t n) {
+    cnt.txFrames++;
+    if (deaf || not_started) return;        // the wire from the Pi is broken / the board is not running
     heard_pi_ = true;                       // stops the READY beacon
+    if (debug_frames) {
+        uint8_t d[4] = { DBG_RX, cmd, (uint8_t)(n > 0 ? p[0] : 0), (uint8_t)(n > 1 ? p[1] : 0) };
+        enqueue(0, CMD_DEBUG, d, 4);
+    }
     switch (cmd) {
+    case CMD_PING:
+        if (debug_frames) { uint8_t d[4] = { DBG_STATUS, 1, C4_FW_VERSION, 0 }; enqueue(0, CMD_DEBUG, d, 4); }
+        break;
+    case CMD_RESET:
+        resets_received++;
+        stall_until_reset = false;          // a real restart re-arms the driver
+        if (debug_frames) reboot(3);
+        break;
     case CMD_HOME:
         homes_received++;
-        if (fail_home) { uint8_t e = ERR_STEPPER_STALL; enqueue(home_ms, CMD_ERROR, &e, 1); }
+        if (fail_home || stall_until_reset) { uint8_t e = ERR_STEPPER_STALL; enqueue(home_ms, CMD_ERROR, &e, 1); }
         else           { enqueue(home_ms, CMD_READY, nullptr, 0); }
         break;
     case CMD_DROP:
@@ -94,10 +136,12 @@ void SimLink::send(uint8_t cmd, const uint8_t* p, uint8_t n) {
 
 bool SimLink::poll(Frame& out, uint64_t now_ms) {
     now_ = now_ms;
+    if (not_started) return false;          // a board held in reset says nothing
     if (!started_) { started_ = true; next_beacon_ = now_ + boot_ms; }
     // beacon READY like the real board until the Pi has said anything
     if (!heard_pi_ && now_ >= next_beacon_) {
-        enqueue(0, CMD_READY, nullptr, 0);
+        if (stall_until_reset) { uint8_t e = ERR_STEPPER_STALL; enqueue(0, CMD_ERROR, &e, 1); }   // boot homing failed
+        else enqueue(0, CMD_READY, nullptr, 0);
         next_beacon_ = now_ + 2000;
     }
     // deliver the earliest due frame
@@ -107,5 +151,6 @@ bool SimLink::poll(Frame& out, uint64_t now_ms) {
     if (best < 0) return false;
     out = q_[best].f;
     q_.erase(q_.begin() + best);
+    cnt.rxFrames++;
     return true;
 }

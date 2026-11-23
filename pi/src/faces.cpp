@@ -123,6 +123,7 @@ void FacePlayer::start(int clip, int loops, const std::string& then) {
     current = clips[clip].group;
     loopsLeft_ = loops;
     then_ = then.empty() ? idle : then;
+    thenLoops_ = 0;
     fi_ = 0;
     nextDue_ = (double)now_ + clips[clip].durations[0];
     started_ = true;
@@ -139,6 +140,13 @@ void FacePlayer::play(const std::string& group, int loops, const std::string& th
     int vi = choices[rng_() % choices.size()];
     lastVariant_[group] = vi;
     start(variants[vi], loops, then);
+}
+
+void FacePlayer::finishPassThen(const std::string& group, int loops) {
+    if (clip_ < 0 || clips.empty()) { play(group, loops); return; }
+    loopsLeft_ = 1;          // update() switches to then_ when this pass ends
+    then_ = group;
+    thenLoops_ = loops;
 }
 
 void FacePlayer::playClip(int index, int loops) {
@@ -159,7 +167,7 @@ bool FacePlayer::update(uint64_t now_ms) {
         nxt = 0;
         if (loopsLeft_ > 0) {
             loopsLeft_--;
-            if (loopsLeft_ == 0) { play(then_, 0); return true; }
+            if (loopsLeft_ == 0) { play(then_, thenLoops_); return true; }
         }
     }
     fi_ = nxt;

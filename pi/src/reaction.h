@@ -23,6 +23,9 @@ public:
         return FACE_IDLE;
     }
     void reset() { last_ = FACE_IDLE; }
+    // R.O.G.E.R's verdict on the human's move, from a quick search of the
+    // position after it (value from R.O.G.E.R's side). Every move gets one.
+    static FaceEvent judge(int32_t value) { return value > 15 ? FACE_BAD_MOVE : FACE_GOOD_MOVE; }
 private:
     FaceEvent last_ = FACE_IDLE;
 };

@@ -49,6 +49,11 @@ public:
     std::string folder, idle = "idle", current;  // current = group playing now
     int clipIndex = -1;                           // index into clips of what is playing
     bool oneShotPlaying() const { return clip_ >= 0 && loopsLeft_ > 0; }
+    // The current clip keeps looping (cancels a pending finishPassThen).
+    void keepLooping() { loopsLeft_ = 0; then_ = idle; thenLoops_ = 0; }
+    // Let the current clip finish the pass it is on, then play `group`
+    // (loops: 0 = forever). Never cuts a clip off mid-pass.
+    void finishPassThen(const std::string& group, int loops = 0);
     std::vector<FaceClip> clips;
 
 private:
@@ -57,6 +62,7 @@ private:
     std::mt19937 rng_{std::random_device{}()};
     int clip_ = -1, fi_ = 0, loopsLeft_ = 0;
     std::string then_;
+    int thenLoops_ = 0;
     double nextDue_ = 0;
     uint64_t now_ = 0;
     bool started_ = false;

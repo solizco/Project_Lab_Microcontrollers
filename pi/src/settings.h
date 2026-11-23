@@ -8,7 +8,7 @@
 struct Settings {
     uint8_t last_mode = 2;   // 0 Pass&Play, 1 Noob, 2 Pro, 3 Hacker. Menu starts here.
     bool screen_only = false; // play on the screen only, gantry parked (Options > Screen only)
-    uint8_t screen_input = 0; // in screen-only games: 0 = Pi keyboard, 1 = Motion Controller buttons
+    uint8_t screen_input = 1; // in screen-only games: 0 = Pi keyboard, 1 = Motion Controller buttons (default)
 
     static std::string defaultPath();
     // Returns true if a valid file was read. On false, *this is left at defaults.
